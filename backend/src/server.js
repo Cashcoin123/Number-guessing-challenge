@@ -7,7 +7,7 @@ const { Server } = require('socket.io');
 
 const storage = require('./services/storage');
 const { authenticateSocket } = require('./middleware/auth');
-const { normaliseMessage } = require('./utils/helpers');
+const { normaliseMessage, resolveDisplayName } = require('./utils/helpers');
 const gameRoutes = require('./routes/gameRoutes');
 const chatRoutes = require('./routes/chatRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -98,7 +98,8 @@ io.use(async (socket, next) => {
   }
 
   socket.data.user = user;
-  socket.data.username = user.username || user.name || user.email || 'player';
+  // Identity email is PII and must never become a public display name (ISSUE-22).
+  socket.data.username = resolveDisplayName(user);
   return next();
 });
 

@@ -62,3 +62,37 @@ test('unknown round ids are rejected', () => {
   roundStore._resetForTests();
   assert.equal(roundStore.submitGuess('does-not-exist', 10), null);
 });
+
+const { resolveDisplayName } = require('../src/utils/helpers');
+
+// ISSUE-22 regression: a decoded Firebase ID token carries no username/name
+// claim, so the identity email must never become the public display name.
+test('display names never fall back to the identity email', () => {
+  const decodedIdToken = {
+    uid: 'USER1',
+    email: 'kyle@example.com',
+    email_verified: true,
+    auth_time: 1750000000,
+    iat: 1750000000,
+    exp: 1750003600,
+    firebase: { sign_in_provider: 'password' },
+  };
+
+  const name = resolveDisplayName(decodedIdToken);
+  assert.equal(typeof name, 'string');
+  assert.ok(name.length > 0);
+  assert.ok(!name.includes('@'), 'display name must not be an email address');
+  assert.notEqual(name, decodedIdToken.email);
+  assert.ok(name.startsWith('Player-'), 'pseudonym should be uid-derived');
+  // Stable across calls so a player keeps one handle.
+  assert.equal(resolveDisplayName(decodedIdToken), name);
+});
+
+test('display names prefer an explicit handle and never leak email', () => {
+  assert.equal(resolveDisplayName({ username: '  Neo  ', email: 'a@b.c' }), 'Neo');
+  assert.equal(resolveDisplayName({ name: 'Player One', email: 'a@b.c' }), 'Player One');
+  assert.equal(resolveDisplayName({ displayName: 'Ada', email: 'a@b.c' }), 'Ada');
+  assert.equal(resolveDisplayName(null), 'Player');
+  assert.equal(resolveDisplayName({}), 'Player');
+  assert.equal(resolveDisplayName({ email: 'a@b.c' }).includes('@'), false);
+});

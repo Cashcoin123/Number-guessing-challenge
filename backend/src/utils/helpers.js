@@ -1,5 +1,7 @@
 // Shared validation and formatting helpers for the Number Guessing Challenge API.
 
+const crypto = require('crypto');
+
 const MAX_MESSAGE_LENGTH = 280;
 const MAX_USERNAME_LENGTH = 32;
 
@@ -53,6 +55,36 @@ function normaliseMessage(value) {
   return trimmed.slice(0, MAX_MESSAGE_LENGTH);
 }
 
+// Resolve a safe, public display name from an authenticated identity.
+//
+// A decoded Firebase ID token is { uid, email, email_verified, auth_time, iat,
+// exp, firebase } and carries no `username` or `name` claim. The previous
+// `username || name || email` fallback therefore published the player's email
+// address as their public chat handle. Email is PII and is never a display name
+// (ISSUE-22): when the identity carries no explicit handle we derive a stable
+// pseudonym from the uid instead.
+function resolveDisplayName(user) {
+  if (!user || typeof user !== 'object') {
+    return 'Player';
+  }
+
+  const explicit = [user.username, user.name, user.displayName]
+    .map((value) => normaliseUsername(value))
+    .find((value) => value);
+
+  if (explicit) {
+    return explicit;
+  }
+
+  const uid = typeof user.uid === 'string' ? user.uid.trim() : '';
+  if (uid) {
+    const digest = crypto.createHash('sha256').update(uid).digest('hex').slice(0, 6);
+    return `Player-${digest}`;
+  }
+
+  return 'Player';
+}
+
 function createResponse(ok, payload = {}) {
   return { ok, ...payload };
 }
@@ -64,5 +96,6 @@ module.exports = {
   parseIntegerInRange,
   normaliseUsername,
   normaliseMessage,
+  resolveDisplayName,
   createResponse,
 };

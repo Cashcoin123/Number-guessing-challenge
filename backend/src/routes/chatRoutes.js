@@ -2,7 +2,7 @@ const express = require('express');
 
 const storage = require('../services/storage');
 const { requireAuth } = require('../middleware/auth');
-const { normaliseMessage } = require('../utils/helpers');
+const { normaliseMessage, resolveDisplayName } = require('../utils/helpers');
 
 const router = express.Router();
 
@@ -37,8 +37,10 @@ router.post('/send', requireAuth, async (req, res) => {
     }
   }
 
-  const username =
-    (req.user && (req.user.username || req.user.name || req.user.email)) || 'player';
+  // Never fall back to the identity email: a decoded Firebase ID token has no
+  // username/name claim, so that fallback published player PII in public chat
+  // (ISSUE-22). resolveDisplayName derives a pseudonym instead.
+  const username = resolveDisplayName(req.user);
 
   const entry = {
     username,
