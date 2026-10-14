@@ -8,6 +8,23 @@ const { parseIntegerInRange } = require('../utils/helpers');
 const router = express.Router();
 
 const BONUS_WINDOW_MS = 24 * 60 * 60 * 1000;
+const CAPACITY_LOG_INTERVAL_MS = 30 * 1000;
+
+// Log capacity refusals at most once per interval. A flood of anonymous
+// /api/game/start calls is exactly when the store fills up, so logging every
+// refusal would turn a game-capacity condition into a log-spam amplifier.
+let lastCapacityLogAtMs = 0;
+
+function logCapacityRefusal(stats) {
+  const now = Date.now();
+  if (now - lastCapacityLogAtMs < CAPACITY_LOG_INTERVAL_MS) {
+    return;
+  }
+  lastCapacityLogAtMs = now;
+  console.warn(
+    `game/start refused: round store at capacity (${stats.active}/${stats.maxTracked} active rounds).`
+  );
+}
 const DEFAULT_BONUS = 50;
 
 function clientRound(round) {
@@ -36,7 +53,20 @@ router.get('/stats', async (req, res) => {
 // the server; only the round id and attempt budget are returned (ISSUE-10).
 router.post('/start', (req, res) => {
   const round = roundStore.createRound();
-  res.json({ ok: true, round: clientRound(round) });
+
+  // The store refuses new rounds rather than terminating rounds that players are
+  // still playing (ISSUE-23). Surface that as a retryable capacity error instead
+  // of a generic failure or - worse - silently dropping an in-flight round.
+  if (!round) {
+    logCapacityRefusal(roundStore.getStoreStats());
+    return res.status(503).json({
+      ok: false,
+      message: 'The game is at capacity right now. Please try again in a moment.',
+      retryable: true,
+    });
+  }
+
+  return res.json({ ok: true, round: clientRound(round) });
 });
 
 // POST /api/game/guess - the client sends ONLY { roundId, guess }.

@@ -6,33 +6,83 @@ const crypto = require('crypto');
 // Rounds are intentionally kept in memory: they are short-lived play sessions,
 // and keeping them out of the JSON storage layer avoids whole-file
 // read-modify-write races between concurrent players.
+//
+// Capacity policy (ISSUE-23): this store is reachable through the unauthenticated
+// POST /api/game/start, so an anonymous caller can create rounds far faster than
+// players finish them. Reclaiming memory must therefore never destroy a round a
+// player is still playing: a round only becomes reclaimable once it is finished,
+// has hit its hard TTL, or has been idle for the idle TTL. When live rounds
+// alone saturate the cap the store refuses new rounds instead of evicting them.
+// The previous "hard cap" dropped the oldest-inserted entries, which are exactly
+// the rounds of players who are mid-game.
 
 const DEFAULT_MAX_ATTEMPTS = 10;
-const ROUND_TTL_MS = 30 * 60 * 1000; // a round expires 30 minutes after it starts
+const ROUND_TTL_MS = 30 * 60 * 1000; // hard limit: a round never outlives this
+const ROUND_IDLE_TTL_MS = Number(process.env.ROUND_IDLE_TTL_MS) > 0
+  ? Number(process.env.ROUND_IDLE_TTL_MS)
+  : 30 * 60 * 1000; // idle limit: reclaimed only after this long without a guess
 const MAX_TRACKED_ROUNDS = 10000;
 
 const rounds = new Map();
 
+function hasExpired(round, now) {
+  if (now - round.startedAtMs > ROUND_TTL_MS) {
+    return true;
+  }
+
+  const lastUsed = Number.isFinite(round.lastUsedAtMs) ? round.lastUsedAtMs : round.startedAtMs;
+  return now - lastUsed > ROUND_IDLE_TTL_MS;
+}
+
+// A round may only be reclaimed for capacity once it can no longer be resumed by
+// its player.
+function isReclaimable(round, now) {
+  return Boolean(round.finished) || hasExpired(round, now);
+}
+
 function sweepExpired(now) {
   for (const [id, round] of rounds) {
-    if (now - round.startedAtMs > ROUND_TTL_MS) {
+    if (hasExpired(round, now)) {
       rounds.delete(id);
-    }
-  }
-  // Hard cap so a flood of abandoned rounds cannot grow memory without bound.
-  if (rounds.size > MAX_TRACKED_ROUNDS) {
-    const excess = rounds.size - MAX_TRACKED_ROUNDS;
-    let removed = 0;
-    for (const id of rounds.keys()) {
-      rounds.delete(id);
-      if (++removed >= excess) break;
     }
   }
 }
 
+// Free capacity using only rounds their player can no longer be playing, oldest
+// first. Returns the number of rounds reclaimed.
+function reclaimEvictable(now, keepAtMost) {
+  let removed = 0;
+
+  for (const [id, round] of rounds) {
+    if (rounds.size <= keepAtMost) break;
+
+    if (isReclaimable(round, now)) {
+      rounds.delete(id);
+      removed += 1;
+    }
+  }
+
+  return removed;
+}
+
+/**
+ * Create a new round.
+ * Returns null when the store cannot admit another round without terminating a
+ * round that a player is still actively playing (ISSUE-23).
+ */
 function createRound(options = {}) {
   const now = Date.now();
   sweepExpired(now);
+
+  if (rounds.size >= MAX_TRACKED_ROUNDS) {
+    reclaimEvictable(now, MAX_TRACKED_ROUNDS - 1);
+  }
+
+  // Live rounds alone fill the store: refuse rather than evict. The caller turns
+  // this into a retryable 503.
+  if (rounds.size >= MAX_TRACKED_ROUNDS) {
+    return null;
+  }
 
   const maxAttempts = Number.isInteger(options.maxAttempts)
     ? options.maxAttempts
@@ -44,6 +94,7 @@ function createRound(options = {}) {
     maxAttempts,
     attempts: 0,
     startedAtMs: now,
+    lastUsedAtMs: now,
     finished: false,
   };
 
@@ -64,7 +115,7 @@ function submitGuess(roundId, guess) {
   const now = Date.now();
   const round = rounds.get(roundId);
 
-  if (!round || now - round.startedAtMs > ROUND_TTL_MS) {
+  if (!round || hasExpired(round, now)) {
     if (round) rounds.delete(roundId);
     return null;
   }
@@ -78,6 +129,8 @@ function submitGuess(roundId, guess) {
     };
   }
 
+  // This round is in active use: protect it from idle/capacity reclamation.
+  round.lastUsedAtMs = now;
   round.attempts += 1;
 
   let result;
@@ -111,6 +164,21 @@ function submitGuess(roundId, guess) {
   return response;
 }
 
+// Lightweight operational visibility: how much of the cap is in use.
+function getStoreStats() {
+  const now = Date.now();
+  let active = 0;
+  for (const round of rounds.values()) {
+    if (!isReclaimable(round, now)) active += 1;
+  }
+
+  return {
+    tracked: rounds.size,
+    active,
+    maxTracked: MAX_TRACKED_ROUNDS,
+  };
+}
+
 function _resetForTests() {
   rounds.clear();
 }
@@ -118,7 +186,10 @@ function _resetForTests() {
 module.exports = {
   DEFAULT_MAX_ATTEMPTS,
   ROUND_TTL_MS,
+  ROUND_IDLE_TTL_MS,
+  MAX_TRACKED_ROUNDS,
   createRound,
   submitGuess,
+  getStoreStats,
   _resetForTests,
 };

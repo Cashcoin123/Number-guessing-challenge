@@ -96,3 +96,92 @@ test('display names prefer an explicit handle and never leak email', () => {
   assert.equal(resolveDisplayName({}), 'Player');
   assert.equal(resolveDisplayName({ email: 'a@b.c' }).includes('@'), false);
 });
+
+// ---------------------------------------------------------------------------
+// ISSUE-23 regression: capacity pressure from the unauthenticated
+// POST /api/game/start must never terminate a round a player is still playing.
+// ---------------------------------------------------------------------------
+const MAX_TRACKED_ROUNDS = roundStore.MAX_TRACKED_ROUNDS;
+
+test('capacity pressure never destroys an in-flight round (ISSUE-23)', () => {
+  roundStore._resetForTests();
+
+  const victim = roundStore.createRound();
+  const first = roundStore.submitGuess(victim.roundId, 50);
+  assert.ok(first, 'victim round must be playable');
+  assert.equal(first.attempts, 1);
+
+  // The attacker floods the store exactly the way an anonymous caller floods
+  // /api/game/start.
+  let refused = 0;
+  for (let i = 0; i < MAX_TRACKED_ROUNDS * 3; i += 1) {
+    if (roundStore.createRound() === null) refused += 1;
+  }
+
+  assert.ok(refused > 0, 'the store must refuse new rounds when live rounds fill it');
+
+  // The regression: the victim is still mid-round and can still play.
+  const second = roundStore.submitGuess(victim.roundId, 51);
+  assert.ok(second, 'in-flight round must survive a flood of anonymous rounds');
+  assert.equal(second.attempts, 2, 'the victim\'s own attempt history is preserved');
+});
+
+test('the store never exceeds its cap while refusing new rounds (ISSUE-23)', () => {
+  roundStore._resetForTests();
+
+  for (let i = 0; i < MAX_TRACKED_ROUNDS; i += 1) {
+    assert.ok(roundStore.createRound(), 'rounds below the cap must be admitted');
+  }
+
+  assert.equal(roundStore.createRound(), null, 'a full store of live rounds refuses new rounds');
+  assert.equal(roundStore.getStoreStats().tracked, MAX_TRACKED_ROUNDS, 'cap is respected');
+});
+
+test('finished rounds are reclaimed before new rounds are refused (ISSUE-23)', () => {
+  roundStore._resetForTests();
+
+  const live = roundStore.createRound();
+
+  // Fill the rest of the store with rounds that are already over (maxAttempts=1
+  // resolves on the first guess), i.e. memory a player can no longer need.
+  const finished = [];
+  for (let i = 0; i < MAX_TRACKED_ROUNDS - 1; i += 1) {
+    finished.push(roundStore.createRound({ maxAttempts: 1 }));
+  }
+  finished.forEach((round) => roundStore.submitGuess(round.roundId, 1));
+
+  // Capacity is reclaimed from finished rounds, so the live round is untouched.
+  assert.ok(roundStore.createRound(), 'a finished round should be reclaimed for capacity');
+  const stillLive = roundStore.submitGuess(live.roundId, 50);
+  assert.ok(stillLive, 'the live round must not be reclaimed');
+  assert.equal(stillLive.attempts, 1);
+});
+
+test('an idle round is reclaimable, an actively played one is not (ISSUE-23)', () => {
+  const script = `
+    process.env.ROUND_IDLE_TTL_MS = '150';
+    const store = require('./src/services/roundStore');
+    store._resetForTests();
+    const idle = store.createRound();
+    const active = store.createRound();
+    // Keep 'active' in use with intervals shorter than the idle TTL, and never
+    // touch 'idle'.
+    setTimeout(() => store.submitGuess(active.roundId, 50), 60);
+    setTimeout(() => store.submitGuess(active.roundId, 51), 120);
+    setTimeout(() => {
+      const idleReclaimed = store.submitGuess(idle.roundId, 50) === null;
+      const activeResumed = store.submitGuess(active.roundId, 52) !== null;
+      console.log(JSON.stringify({ idleReclaimed, activeResumed }));
+    }, 200);
+  `;
+
+  const output = require('node:child_process').execFileSync('node', ['-e', script], {
+    cwd: require('node:path').resolve(__dirname, '..'),
+    env: { ...process.env },
+    encoding: 'utf8',
+  });
+
+  const result = JSON.parse(output.trim().split('\n').pop());
+  assert.equal(result.idleReclaimed, true, 'an idle round must become reclaimable');
+  assert.equal(result.activeResumed, true, 'a round still being played must survive');
+});

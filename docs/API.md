@@ -52,6 +52,20 @@ Response:
 }
 ```
 
+Rounds are held in memory and the store is bounded. When every tracked slot is held
+by a round a player is still playing, the API refuses to admit another round rather
+than terminating one that is in progress. The refusing response is retryable:
+
+```json
+{
+  "ok": false,
+  "message": "The game is at capacity right now. Please try again in a moment.",
+  "retryable": true
+}
+```
+HTTP status `503`. Finished, expired and idle rounds are reclaimed automatically, so
+this only occurs when live rounds alone saturate the store.
+
 ### Submit Guess
 ```
 POST /game/guess
