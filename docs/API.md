@@ -66,6 +66,22 @@ than terminating one that is in progress. The refusing response is retryable:
 HTTP status `503`. Finished, expired and idle rounds are reclaimed automatically, so
 this only occurs when live rounds alone saturate the store.
 
+The endpoint is also admitted through a per-source rate limit, because it is
+intentionally open to guests. A single source may create a bounded number of
+rounds per window (`ROUNDS_RATE_MAX` per `ROUNDS_RATE_WINDOW_MS`, default 30 per
+minute); going over returns a retryable `429`:
+
+```json
+{
+  "ok": false,
+  "message": "Too many new rounds started from this source. Please wait a moment and try again.",
+  "retryable": true
+}
+```
+Responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining` and
+`X-RateLimit-Reset`, and a `Retry-After` header on the `429`. The limiter keys on
+the client address, which honours `TRUST_PROXY` (off by default).
+
 ### Submit Guess
 ```
 POST /game/guess

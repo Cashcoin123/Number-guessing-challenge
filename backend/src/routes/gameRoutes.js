@@ -3,9 +3,24 @@ const express = require('express');
 const storage = require('../services/storage');
 const roundStore = require('../services/roundStore');
 const { requireAuth } = require('../middleware/auth');
+const { createRateLimiter } = require('../middleware/rateLimit');
 const { parseIntegerInRange } = require('../utils/helpers');
 
 const router = express.Router();
+
+// Per-source admission control for round creation (ISSUE-23 residual).
+//
+// POST /api/game/start is open to guests by design, so one anonymous source can
+// create rounds far faster than players finish them. The store now refuses new
+// rounds instead of terminating rounds in play, but a single source could still
+// saturate the capped store and make NEW rounds fail for everyone until idle/TTL
+// reclamation caught up. Bounding how many rounds one source may create per
+// window removes that trivial single-source denial path while leaving honest play
+// (a handful of rounds a minute) untouched.
+const startRateLimiter = createRateLimiter({
+  windowMs: Number(process.env.ROUNDS_RATE_WINDOW_MS) || undefined,
+  max: Number(process.env.ROUNDS_RATE_MAX) || undefined,
+});
 
 const BONUS_WINDOW_MS = 24 * 60 * 60 * 1000;
 const CAPACITY_LOG_INTERVAL_MS = 30 * 1000;
@@ -51,7 +66,7 @@ router.get('/stats', async (req, res) => {
 
 // POST /api/game/start - create a server-side round. The secret number stays on
 // the server; only the round id and attempt budget are returned (ISSUE-10).
-router.post('/start', (req, res) => {
+router.post('/start', startRateLimiter, (req, res) => {
   const round = roundStore.createRound();
 
   // The store refuses new rounds rather than terminating rounds that players are
@@ -122,3 +137,5 @@ router.post('/bonus', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+// Exposed so tests can reset the limiter's accounting between cases.
+module.exports.startLimiter = startRateLimiter;

@@ -14,6 +14,15 @@ const userRoutes = require('./routes/userRoutes');
 
 const app = express();
 
+// --- Proxy trust -------------------------------------------------------------
+// The rate limiter keys its buckets on req.ip. Trusting X-Forwarded-For
+// unconditionally would let a caller choose its own bucket (and therefore evade
+// the limit), so proxy trust is an explicit, off-by-default opt-in for
+// deployments that sit behind a trusted reverse proxy (ISSUE-23 residual).
+if (process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', 1);
+}
+
 // --- CORS -------------------------------------------------------------------
 // When CLIENT_URL is configured, restrict browser origins to that allowlist
 // (comma-separated) instead of reflecting any origin (ISSUE-5). If it is not
