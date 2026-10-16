@@ -80,7 +80,10 @@ minute); going over returns a retryable `429`:
 ```
 Responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining` and
 `X-RateLimit-Reset`, and a `Retry-After` header on the `429`. The limiter keys on
-the client address, which honours `TRUST_PROXY` (off by default).
+the client address, which honours `TRUST_PROXY` (off by default). Equivalent
+textual forms of one address share a bucket, and IPv6 clients are budgeted per
+`/64` prefix, so a single host cannot obtain extra budget by rewording its
+address or by changing its interface identifier.
 
 ### Submit Guess
 ```
