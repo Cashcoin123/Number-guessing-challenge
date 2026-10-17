@@ -9,6 +9,7 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHAT_FILE = path.join(DATA_DIR, 'chat_messages.json');
 const LEADERBOARD_FILE = path.join(DATA_DIR, 'leaderboard.json');
 const GAME_FILE = path.join(DATA_DIR, 'game_data.json');
+const BONUS_FILE = path.join(DATA_DIR, 'bonus.json');
 
 const USE_FIREBASE = process.env.USE_FIREBASE === 'true';
 const firebaseDb = initFirebase();
@@ -32,6 +33,10 @@ ensureFile(GAME_FILE, {
   totalGames: 0,
   lastBonusTime: 0,
 });
+// Per-user daily bonus records, keyed by authenticated uid. A single shared
+// timestamp (the previous design) let one player's claim block every other
+// player (ISSUE-8).
+ensureFile(BONUS_FILE, {});
 
 function readJson(filePath, fallback) {
   try {
@@ -43,7 +48,12 @@ function readJson(filePath, fallback) {
 }
 
 function writeJson(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  // Write to a temp file first and rename over the target so a concurrent
+  // reader (or a crash mid-write) can never observe a half-written JSON file
+  // (ISSUE-7: non-atomic whole-file read-modify-write).
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmpPath, filePath);
 }
 
 async function getUsers() {
@@ -171,6 +181,45 @@ async function saveGameStats(data) {
   });
 }
 
+// Per-user daily bonus records ---------------------------------------------
+
+async function getBonusRecords() {
+  if (USE_FIREBASE && firebaseDb) {
+    const snapshot = await firebaseDb.collection('bonuses').get();
+    const records = {};
+    snapshot.forEach((doc) => {
+      records[doc.id] = doc.data();
+    });
+    return records;
+  }
+
+  return readJson(BONUS_FILE, {});
+}
+
+async function getBonusRecord(userId) {
+  if (!userId) {
+    return null;
+  }
+
+  const records = await getBonusRecords();
+  return records[userId] || null;
+}
+
+async function saveBonusRecord(userId, record) {
+  if (!userId) {
+    return;
+  }
+
+  if (USE_FIREBASE && firebaseDb) {
+    await firebaseDb.collection('bonuses').doc(userId).set(record, { merge: true });
+    return;
+  }
+
+  const records = readJson(BONUS_FILE, {});
+  records[userId] = { ...(records[userId] || {}), ...record };
+  writeJson(BONUS_FILE, records);
+}
+
 module.exports = {
   getUsers,
   saveUsers,
@@ -180,4 +229,7 @@ module.exports = {
   saveLeaderboard,
   getGameStats,
   saveGameStats,
+  getBonusRecords,
+  getBonusRecord,
+  saveBonusRecord,
 };

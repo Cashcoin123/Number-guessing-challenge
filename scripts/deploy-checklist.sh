@@ -16,57 +16,34 @@ echo ""
 
 echo "=== Backend Configuration ==="
 echo "Set these environment variables in Render:"
-echo "  USE_FIREBASE=true"
 echo "  ENABLE_AUTH=true"
+echo "  ALLOW_DEV_AUTH=false   # never enable the dev bypass in production"
+echo "  USE_FIREBASE=true"
 echo "  FIREBASE_PROJECT_ID=<your-project-id>"
 echo "  GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json"
+echo "  CLIENT_URL=https://your-frontend-domain.com"
 echo "  NODE_ENV=production"
 echo "  PORT=5000"
 echo ""
 
 echo "=== Frontend Configuration ==="
-echo "Set these environment variables in Vercel:"
-echo "  REACT_APP_API_URL=https://your-backend-url.render.com"
-echo "  REACT_APP_FIREBASE_PROJECT_ID=<your-project-id>"
+echo "Set these environment variables in Vercel (Vite requires the VITE_ prefix):"
+echo "  VITE_API_URL=https://your-backend-url.render.com"
 echo ""
 
 echo "=== Firestore Security Rules ==="
-echo "Update Firestore rules to:"
-echo ""
-cat << 'EOF'
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{userId} {
-      allow read: if true;
-      allow write: if request.auth.uid == userId;
-    }
-    
-    match /chat_messages/{messageId} {
-      allow read: if true;
-      allow create: if request.auth != null;
-      allow update, delete: if request.auth.uid == resource.data.userId;
-    }
-    
-    match /leaderboard/{document=**} {
-      allow read: if true;
-      allow write: if false;
-    }
-    
-    match /game/{document=**} {
-      allow read: if true;
-      allow write: if false;
-    }
-  }
-}
-EOF
+echo "The rules are version-controlled in firestore.rules and firebase.json."
+echo "Deploy them with:"
+echo "  firebase deploy --only firestore:rules"
+echo "The /users rule is owner-scoped (request.auth.uid == userId); the users"
+echo "collection is NOT world-readable."
 echo ""
 
 echo "=== Deploy Steps ==="
 echo "1. Push code to main branch"
-echo "2. GitHub Actions will trigger automatic deployment"
-echo "3. Verify /api/health endpoint returns 200"
-echo "4. Test auth flow with Firebase token"
+echo "2. Deploy Firestore rules: firebase deploy --only firestore:rules"
+echo "3. Verify /api/health endpoint returns 200 (it no longer reports auth mode)"
+echo "4. Test auth flow with a Firebase ID token"
 echo "5. Monitor Firestore for data writes"
 echo ""
 
@@ -76,7 +53,7 @@ echo "□ Frontend loads and connects to backend"
 echo "□ Firebase Auth login works"
 echo "□ Chat messages save to Firestore"
 echo "□ Leaderboard updates persist"
-echo "□ User profiles save with auth UID"
+echo "□ User profiles save with auth UID and are owner-readable only"
 echo "□ Mobile app builds with Expo EAS"
 echo "□ End-to-end auth flow verified"
 echo ""

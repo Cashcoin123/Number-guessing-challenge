@@ -1,20 +1,27 @@
-const admin = require('firebase-admin');
-
-function initFirebase() {
-  if (!process.env.FIREBASE_PROJECT_ID) {
-    return null;
+{
+  "name": "number-guessing-challenge-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend API for the Number Guessing Challenge global game",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "game",
+    "api",
+    "realtime"
+  ],
+  "author": "Cashcoin123",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.7.0",
+    "pg": "^8.12.0",
+    "socket.io": "^4.7.5"
   }
-
-  if (!admin.apps.length) {
-    admin.initializeApp({
-      credential: admin.credential.applicationDefault(),
-      projectId: process.env.FIREBASE_PROJECT_ID,
-    });
-  }
-
-  return admin.firestore();
 }
-
-module.exports = {
-  initFirebase,
-};

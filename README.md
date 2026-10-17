@@ -1,99 +1,138 @@
+# Number Guessing Challenge
 
-# Production Upgrade Plan
+A global multiplayer number guessing game with live chat, scoring, daily bonuses, and social sharing. Available on web, iPhone, and Android.
 
-This document describes the next production phase for the game.
+## 🎮 Features
 
-## 1. Data Layer
+✅ **Gameplay**
+- Guess a random number between 1 and 100
+- 10 attempts per round
+- Score based on attempts
+- Streak tracking and best score
+- Daily +50 point bonus every 24 hours
 
-The app currently uses local JSON files for development. The next step is to move to a persistent database layer.
+✅ **Multiplayer**
+- Global chat room
+- Real-time leaderboard
+- Player profiles
+- Message history
 
-### Recommended choices
-- Firebase Firestore for easy setup and realtime syncing
-- PostgreSQL for structured, relational data and easier analytics
+✅ **Cross-Platform**
+- Web app (React + Vite)
+- Mobile apps (React Native + Expo)
+- Responsive design for all devices
 
-### Recommended data model
-- `users`
-  - id
-  - username
-  - email
-  - best_score
-  - streak
-  - joined_at
-  - last_bonus_at
-- `scores`
-  - id
-  - user_id
-  - points
-  - created_at
-- `chat_messages`
-  - id
-  - username
-  - message
-  - score
-  - created_at
-- `leaderboard`
-  - ranking snapshot
-  - updated_at
+✅ **Production Ready**
+- Local development setup
+- Deployment to Vercel, Render, and App Stores
+- Socket.IO for real-time features
+- Persistent data storage
 
-## 2. Authentication
-
-Use Firebase Auth or JWT.
-
-### Recommended approach
-- Firebase Auth for web and mobile apps
-- JWT for backend API flows
-- Session data stored securely on server side
-
-## 3. Realtime multiplayer
-
-Use Socket.IO rooms to support:
-- global chat room
-- challenge rooms
-- by-country or by-language chat groups
-- room-based live matches
-
-## 4. Deployment pipeline
+## 🚀 Quick Start
 
 ### Backend
-- Render or Railway for Node.js app hosting
-- Set NODE_ENV=production
-- Set `DATABASE_URL` or Firebase project credentials
+```bash
+cd backend
+npm install
+cp .env.example .env
+npm run dev
+```
 
-### Frontend (web)
-- Vercel
-- Deploy `frontend` as production build
-- Use env vars for backend API URL
+### Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
 ### Mobile
-- Expo EAS
-- Build iOS and Android with store submission pipeline
+```bash
+cd mobile
+npm install
+npx expo start
+```
 
-## 5. Monitoring
+Open http://localhost:5173 in your browser.
 
-Add:
-- Sentry
-- PostHog or Mixpanel analytics
-- uptime monitor
-- error logging
+## 📚 Documentation
 
-## 6. Launch checklist
+- [Setup Guide](docs/SETUP.md) — Local development
+- [Deployment Guide](docs/DEPLOYMENT.md) — Production setup
+- [API Documentation](docs/API.md) — API endpoints
 
-- [ ] Database migrated from JSON storage
-- [ ] Auth active for players
-- [ ] Global leaderboard live
-- [ ] Real-time chat working
-- [ ] Deployment environment live
-- [ ] Mobile builds passing
-- [ ] Error monitoring active
-- [ ] Store metadata ready
+## 🏗️ Architecture
 
-## 7. Recommended first production release
+```
+┌─────────────────────────────────────┐
+│   Frontend (React + Vite)           │
+│   Mobile (React Native + Expo)      │
+└──────────────┬──────────────────────┘
+               │ HTTP/WebSocket
+               ↓
+┌─────────────────────────────────────┐
+│   Backend (Node.js + Express)       │
+│   Real-time (Socket.IO)             │
+└──────────────┬──────────────────────┘
+               │ File System / Firebase / Postgres
+               ↓
+┌─────────────────────────────────────┐
+│   Data Store                        │
+│   • game_data.json                  │
+│   • chat_messages.json              │
+│   • users.json                      │
+│   • leaderboard.json                │
+└─────────────────────────────────────┘
+```
 
-For the first live product, keep it simple:
-- Firebase Firestore
-- Firebase Auth
-- Socket.IO chat rooms
-- Vercel + Render
-- Expo EAS for mobile builds
+## 📊 API Endpoints
 
-This gives the fastest launch while keeping the app production-safe.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Health check |
+| GET | `/api/game/stats` | Game statistics |
+| POST | `/api/game/guess` | Submit guess |
+| POST | `/api/game/bonus` | Claim daily bonus |
+| GET | `/api/chat/messages` | Chat history |
+| POST | `/api/chat/send` | Send message |
+| GET | `/api/leaderboard` | Global rankings |
+
+## 🌍 Deployment
+
+### Backend
+- **Render:** `git push origin main` (auto-deploy)
+- **Railway:** Connect GitHub repo
+- **Heroku:** `git push heroku main`
+
+### Frontend
+- **Vercel:** `vercel --prod`
+- **Netlify:** `netlify deploy --prod`
+
+### Mobile
+- **iOS:** `eas build --platform ios` → `eas submit --platform ios`
+- **Android:** `eas build --platform android` → `eas submit --platform android`
+
+## 🔄 Next Steps
+
+- [ ] Add Firebase/Postgres database
+- [ ] Implement user authentication
+- [ ] Deploy backend to production
+- [ ] Deploy web to production
+- [ ] Build and submit mobile apps
+- [ ] Add push notifications
+- [ ] Set up analytics and monitoring
+
+## 📝 License
+
+MIT — See [LICENSE](LICENSE) for details.
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit changes
+4. Push to branch
+5. Open a pull request
+
+---
+
+Built with ❤️ by **Cashcoin123**
