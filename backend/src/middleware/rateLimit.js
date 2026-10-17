@@ -14,8 +14,8 @@
 // caller pick its own bucket (and therefore bypass the limit), so proxy trust is
 // an explicit, off-by-default opt-in (TRUST_PROXY in server.js).
 //
-// A source key is only as good as its canonical form. Two bypasses that need no
-// real address rotation are closed here (ISSUE-23 residual):
+// A source key is only as good as its canonical form. Several bypasses that need
+// no real address rotation are closed here (ISSUE-23 residual):
 //   * alternate but equivalent textual forms of one address used to earn a full
 //     budget each (`203.0.113.9` vs `::ffff:203.0.113.9`, `2001:DB8::1` vs
 //     `2001:0db8:0000:0000:0000:0000:0000:0001`);
@@ -23,7 +23,29 @@
 //     host could draw 2^64 distinct keys - IPv6 keys are therefore aggregated to
 //     their /64 prefix, exactly as general-purpose edge limiters do.
 //
-// Memory: the bucket table is pruned and hard-capped, and the cap now FAILS
+// The key space is now also BOUNDED by construction, because a canonical form
+// that is merely "usually the same" is not a limit: any *family* of textual
+// variants of one address still mints one bucket per variant. A caller that can
+// present its own address text (TRUST_PROXY on, behind a proxy that does not
+// overwrite the header - see below) could therefore multiply its own budget and
+// walk the whole bucket table with a single machine, at which point the
+// fail-closed cap denied honest new sources. `canonicalizeSourceKey` now:
+//   * strips a trailing port from an UNBRACKETED host too (`203.0.113.9:12345`,
+//     `::ffff:203.0.113.9:12345`), not just from a bracketed one;
+//   * accepts leading-zero / octal-looking octets and normalises them, so
+//     `0203.0.113.9` and `203.000.113.009` are the same source as `203.0.113.9`;
+//   * maps anything that is not a valid address into ONE shared bucket instead
+//     of keying on raw attacker-controlled text, so junk input consumes exactly
+//     one slot instead of one slot per string.
+//
+// Note on scope: a source picks only its *text*, never its address, unless a
+// deployment trusts a header the client can also set. Genuine source-address
+// rotation (a different OS-level address, or a spoofable proxy header carrying a
+// different valid address) remains unbounded by design; this limiter can bind
+// only the spellings of one address. Authenticating the endpoint is the durable
+// alternative and is deliberately out of scope.
+//
+// Memory: the bucket table is pruned and hard-capped, and the cap FAILS
 // CLOSED. When the table is full and nothing has expired, a new source is
 // refused rather than served by evicting a live bucket: the previous
 // evict-the-oldest behaviour handed an already-exhausted source a fresh budget
@@ -34,6 +56,13 @@ const DEFAULT_WINDOW_MS = 60 * 1000;
 const DEFAULT_MAX = 30;
 const MAX_TRACKED_KEYS = 10000;
 const PROXY_WARNING_INTERVAL_MS = 5 * 60 * 1000;
+
+// A missing address fails closed into one shared bucket, and so does text that is
+// not a valid address. They are separate fixed keys purely so that a deployment
+// with no usable socket address is not charged for remote junk; both are single
+// buckets, so neither can be multiplied by caller-controlled text.
+const MISSING_SOURCE_KEY = 'unknown';
+const UNPARSEABLE_SOURCE_KEY = 'unparseable';
 
 // Throttled operator diagnostics: at most one warning per interval, so a flood
 // cannot turn the warning into a log-spam amplifier.
@@ -75,8 +104,12 @@ function positiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+// Parse a dotted-quad IPv4 literal. Leading zeros are accepted and normalised
+// (`0203.0.113.9` -> `203.0.113.9`) because some proxies and clients emit
+// zero-padded octets; if they were rejected they would fall through to the raw
+// text and every padding width would buy a separate budget.
 function parseIpv4(value) {
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
+  if (!/^\d+(\.\d+){3}$/.test(value)) {
     return null;
   }
 
@@ -159,69 +192,136 @@ function parseIpv6(value) {
 }
 
 /**
- * Reduce a client address to the key the limiter budgets against.
+ * Map one address literal (no port, no zone) to its limiter key, or `null` when
+ * the text is not a valid address.
  *
- * - IPv4 addresses (including the `::ffff:` mapped and embedded
- *   IPv4-compatible forms) key on the whole address.
- * - IPv6 addresses key on their /64 prefix, so one machine cannot mint a new
- *   budget per interface identifier.
- * - Anything unparseable keeps its own trimmed key rather than collapsing into a
- *   shared bucket; a missing address is a single shared "unknown" bucket, which
- *   fails closed instead of granting an unbounded budget.
+ * - IPv4 keys on the whole address (`0203.0.113.9` -> `203.0.113.9`).
+ * - `::ffff:`-mapped IPv4 keys on the embedded IPv4 address, so the mapped and
+ *   plain spellings of one host share one budget.
+ * - Every other IPv6 address keys on its /64 prefix, so one machine cannot mint
+ *   a new budget per interface identifier. (The deprecated IPv4-compatible
+ *   forms `::a.b.c.d` are distinct addresses and get their own /64 key; every
+ *   spelling of each still collapses to that one key.)
  */
-function canonicalizeSourceKey(raw) {
-  if (typeof raw !== 'string') {
-    return 'unknown';
-  }
-
-  let value = raw.trim().toLowerCase();
-
-  if (!value) {
-    return 'unknown';
-  }
-
-  // Tolerate a bracketed host with a port, as some proxies forward it.
-  const bracketed = /^\[(.+)\](?::\d+)?$/.exec(value);
-  if (bracketed) {
-    value = bracketed[1];
-  }
-
-  // Drop a scope/zone suffix (`fe80::1%eth0`): it is link-local decoration, not
-  // part of the identity, and leaving it in would let one host present several
-  // keys for the same address.
-  const zoneAt = value.indexOf('%');
-  if (zoneAt !== -1) {
-    value = value.slice(0, zoneAt);
-  }
-
+function addressKey(value) {
   const quad = parseIpv4(value);
   if (quad) {
     return quad.join('.');
   }
 
   const words = parseIpv6(value);
-  if (words) {
-    const mappedPrefix = words.slice(0, 5).every((word) => word === 0)
-      && words[5] === 0xffff;
-
-    if (mappedPrefix) {
-      return [
-        words[6] >> 8,
-        words[6] & 0xff,
-        words[7] >> 8,
-        words[7] & 0xff,
-      ].join('.');
-    }
-
-    return `${words.slice(0, 4).map((word) => word.toString(16)).join(':')}/64`;
+  if (!words) {
+    return null;
   }
 
-  return value;
+  const mappedPrefix = words.slice(0, 5).every((word) => word === 0)
+    && words[5] === 0xffff;
+
+  if (mappedPrefix) {
+    return [
+      words[6] >> 8,
+      words[6] & 0xff,
+      words[7] >> 8,
+      words[7] & 0xff,
+    ].join('.');
+  }
+
+  return `${words.slice(0, 4).map((word) => word.toString(16)).join(':')}/64`;
+}
+
+/**
+ * Key one host text, tolerating a scope/zone suffix (`fe80::1%eth0`, or the
+ * percent-encoded `%25` form). The zone is link-local decoration, not part of
+ * the identity, and leaving it in would let one host present several keys for
+ * the same address. Returns `null` when no address can be recognised.
+ */
+function hostKey(text) {
+  let value = text;
+  const zoneAt = value.search(/%25|%/);
+
+  if (zoneAt !== -1) {
+    value = value.slice(0, zoneAt);
+  }
+
+  if (!value) {
+    return null;
+  }
+
+  return addressKey(value);
+}
+
+/**
+ * Reduce a client address to the key the limiter budgets against.
+ *
+ * The key space must be BOUNDED for any one real source: varying only the
+ * textual spelling of an address must not mint additional buckets. A canonical
+ * form that is merely "usually the same" is not a limit, because every extra
+ * variant is extra budget and one caller can walk the whole bucket table with a
+ * single address. Accordingly:
+ *
+ * - A trailing port is dropped from both bracketed hosts (`[::1]:443`) and
+ *   unbracketed ones (`203.0.113.9:12345`, `::ffff:203.0.113.9:12345`). The port
+ *   is never part of the identity: one address is one source whatever port it
+ *   speaks from. An unbracketed string is parsed as an address FIRST, so a
+ *   genuinely numeric final IPv6 group (`2001:db8::1:443`) stays an address.
+ * - Case, surrounding whitespace, a zone suffix, bracket style, and
+ *   leading-zero octets are all normalised away.
+ * - IPv6 keys on its /64 and `::ffff:IPv4` on the embedded IPv4 address, as
+ *   before.
+ * - A missing address is ONE shared bucket (`unknown`) and text that is not a
+ *   valid address is ONE shared bucket (`unparseable`). Neither keys on
+ *   attacker-controlled text, so junk input can consume at most one table slot
+ *   in total rather than one per distinct string.
+ *
+ * What this cannot bound: a source that presents a genuinely different valid
+ * address each request (real OS-level rotation, or a proxy topology where the
+ * caller controls the forwarded address). That is inherent to source-keyed
+ * limiting; see the note in the file header.
+ */
+function canonicalizeSourceKey(raw) {
+  if (typeof raw !== 'string') {
+    return MISSING_SOURCE_KEY;
+  }
+
+  const value = raw.trim().toLowerCase();
+
+  if (!value) {
+    return MISSING_SOURCE_KEY;
+  }
+
+  // Bracketed form: the brackets delimit the host, so a trailing port is
+  // unambiguous even for IPv6. (`[::1]:443`, `[fe80::1%eth0]:80`.)
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(value);
+  if (bracketed) {
+    return hostKey(bracketed[1]) || UNPARSEABLE_SOURCE_KEY;
+  }
+
+  // A stray bracket means this is not a host we can interpret; do not key on it.
+  if (value.indexOf('[') !== -1 || value.indexOf(']') !== -1) {
+    return UNPARSEABLE_SOURCE_KEY;
+  }
+
+  const direct = hostKey(value);
+  if (direct) {
+    return direct;
+  }
+
+  // Not an address on its own. A proxy may have forwarded `host:port`, which
+  // would otherwise make the unbounded port space an unbounded budget space.
+  const lastColon = value.lastIndexOf(':');
+  if (lastColon !== -1 && /^\d*$/.test(value.slice(lastColon + 1))) {
+    const withoutPort = hostKey(value.slice(0, lastColon));
+    if (withoutPort) {
+      return withoutPort;
+    }
+  }
+
+  return UNPARSEABLE_SOURCE_KEY;
 }
 
 function defaultKeyGenerator(req) {
   if (!req) {
-    return 'unknown';
+    return MISSING_SOURCE_KEY;
   }
 
   if (typeof req.ip === 'string' && req.ip) {
@@ -232,7 +332,7 @@ function defaultKeyGenerator(req) {
     return canonicalizeSourceKey(req.socket.remoteAddress);
   }
 
-  return 'unknown';
+  return MISSING_SOURCE_KEY;
 }
 
 /**

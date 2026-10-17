@@ -80,10 +80,29 @@ minute); going over returns a retryable `429`:
 ```
 Responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining` and
 `X-RateLimit-Reset`, and a `Retry-After` header on the `429`. The limiter keys on
-the client address, which honours `TRUST_PROXY` (off by default). Equivalent
-textual forms of one address share a bucket, and IPv6 clients are budgeted per
-`/64` prefix, so a single host cannot obtain extra budget by rewording its
-address or by changing its interface identifier.
+the client address, which honours `TRUST_PROXY` (off by default). The key space
+is bounded, so one source cannot buy extra budget by rewording its address:
+
+- a trailing port is ignored, whether the host is bracketed (`[::1]:443`) or not
+  (`203.0.113.9:12345`, `::ffff:203.0.113.9:12345`);
+- case, surrounding whitespace, a zone suffix and leading-zero octets are
+  normalised (`0203.0.113.9` is the same source as `203.0.113.9`);
+- `::ffff:`-mapped IPv4 is the same source as the plain IPv4 address, and IPv6
+  clients are budgeted per `/64` prefix, so one host cannot mint a budget per
+  interface identifier;
+- input that is not a valid address is confined to a single shared bucket rather
+  than keyed on its raw text, so junk cannot consume the bucket table.
+
+A third refusal also exists for the limiter's own bucket table: when the table is
+full of live buckets and nothing has expired, a brand-new source is refused with
+the same retryable `429` and the message `Too many distinct sources are starting
+rounds right now.`, rather than being served by evicting a live source's bucket.
+
+This bounds *spellings of one address*. It does not bound a caller that presents
+a genuinely different valid address each request (real source-address rotation,
+or a proxy that forwards a client-controlled address); authenticating
+`POST /api/game/start` is the durable fix for that and is intentionally not done,
+because the endpoint is open to guests.
 
 ### Submit Guess
 ```
