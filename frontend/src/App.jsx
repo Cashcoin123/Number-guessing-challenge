@@ -99,6 +99,14 @@ function App() {
       setChatMessages((current) => [...current, entry].slice(-20));
     });
 
+    // The leaderboard is documented as realtime. The server pushes the new
+    // ranking after a scored round, so other clients update without polling.
+    socket.on('leaderboard-update', (payload) => {
+      if (payload && Array.isArray(payload.leaderboard)) {
+        setLeaderboard(payload.leaderboard);
+      }
+    });
+
     return () => {
       socket.disconnect();
     };
@@ -217,12 +225,22 @@ function App() {
       } else if (data.result === 'too-high') {
         setMessage('📈 Too high! Try again.');
       } else if (data.result === 'correct') {
-        const points = Math.max(20, 100 - (data.attempts || 1) * 8);
-        const nextScore = score + points;
+        // The server now owns scoring: it awards points on the winning guess
+        // and returns the authoritative totals. The SPA must render those
+        // values, not compute its own, or the HUD and the leaderboard drift
+        // apart. A guest round (or a failed award) is explicitly unscored.
+        const points = data.scored ? Number(data.awarded || 0) : 0;
+        const nextScore = data.scored ? Number(data.score || 0) : score;
         setScore(nextScore);
-        setBestScore((current) => Math.max(current, nextScore));
-        setStreak((current) => current + 1);
-        setMessage(`✅ Correct! You won ${points} points.`);
+        if (data.scored) {
+          setBestScore(Number(data.bestScore || nextScore));
+          setStreak(Number(data.streak || 0));
+        }
+        setMessage(
+          data.scored
+            ? `You won ${points} points!`
+            : `Correct! Sign in to record your score on the leaderboard.`
+        );
         setRoundId(null);
         loadLeaderboard();
       } else if (data.result === 'round-over') {

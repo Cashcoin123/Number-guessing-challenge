@@ -6,6 +6,7 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 
 const storage = require('./services/storage');
+const { buildLeaderboard } = require('./services/scoring');
 const { authenticateSocket } = require('./middleware/auth');
 const { normaliseMessage, resolveDisplayName } = require('./utils/helpers');
 const gameRoutes = require('./routes/gameRoutes');
@@ -79,20 +80,11 @@ app.use('/api/game', gameRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/users', userRoutes);
 
+// Ranking is built by the scoring service so the REST payload and the realtime
+// `leaderboard-update` broadcast can never disagree about order or shape.
 app.get('/api/leaderboard', async (req, res) => {
   const users = await storage.getUsers();
-  const leaderboard = Object.values(users)
-    .sort((a, b) => (b.bestScore || 0) - (a.bestScore || 0))
-    .slice(0, 50)
-    .map((user, index) => ({
-      rank: index + 1,
-      username: user.username,
-      bestScore: user.bestScore || 0,
-      streak: user.streak || 0,
-      messagesSent: user.messagesSent || 0,
-    }));
-
-  res.json({ ok: true, leaderboard });
+  res.json({ ok: true, leaderboard: buildLeaderboard(users) });
 });
 
 // --- Socket.IO --------------------------------------------------------------

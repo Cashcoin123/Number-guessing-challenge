@@ -88,11 +88,21 @@ function createRound(options = {}) {
     ? options.maxAttempts
     : DEFAULT_MAX_ATTEMPTS;
 
+  // `ownerUid` binds the round to an authenticated player so a win can be
+  // scored against that player and only that player (ISSUE-24). It is null for
+  // an anonymous guest round, which stays unscored - the caller cannot name a
+  // different player's uid, so a guest cannot mint score for someone else.
+  const ownerUid =
+    typeof options.ownerUid === 'string' && options.ownerUid.trim()
+      ? options.ownerUid.trim()
+      : null;
+
   const round = {
     id: crypto.randomUUID(),
     secretNumber: crypto.randomInt(1, 101), // 1..100 inclusive
     maxAttempts,
     attempts: 0,
+    ownerUid,
     startedAtMs: now,
     lastUsedAtMs: now,
     finished: false,
@@ -126,6 +136,8 @@ function submitGuess(roundId, guess) {
       attempts: round.attempts,
       maxAttempts: round.maxAttempts,
       remaining: 0,
+      attemptsUsedNow: 0,
+      ownerUid: round.ownerUid,
     };
   }
 
@@ -153,6 +165,12 @@ function submitGuess(roundId, guess) {
     attempts: round.attempts,
     maxAttempts: round.maxAttempts,
     remaining: Math.max(0, round.maxAttempts - round.attempts),
+    // Whether THIS call consumed an attempt. The scoring layer awards points
+    // exactly once, on the transition to a win, so it must not key off
+    // `attempts` alone (a replayed request on a finished round also carries a
+    // non-zero attempts count).
+    attemptsUsedNow: 1,
+    ownerUid: round.ownerUid,
   };
 
   if (result === 'correct') {

@@ -2,9 +2,10 @@ const express = require('express');
 
 const storage = require('../services/storage');
 const roundStore = require('../services/roundStore');
-const { requireAuth } = require('../middleware/auth');
+const scoring = require('../services/scoring');
+const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { createRateLimiter } = require('../middleware/rateLimit');
-const { parseIntegerInRange } = require('../utils/helpers');
+const { parseIntegerInRange, resolveDisplayName } = require('../utils/helpers');
 
 const router = express.Router();
 
@@ -66,8 +67,12 @@ router.get('/stats', async (req, res) => {
 
 // POST /api/game/start - create a server-side round. The secret number stays on
 // the server; only the round id and attempt budget are returned (ISSUE-10).
-router.post('/start', startRateLimiter, (req, res) => {
-  const round = roundStore.createRound();
+router.post('/start', startRateLimiter, optionalAuth, (req, res) => {
+  // Identity is optional: guests must be able to play, but when the caller IS
+  // authenticated the round is bound to them so a win can be scored against
+  // them (ISSUE-24). The uid comes from the verified token, never the body.
+  const ownerUid = (req.user && req.user.uid) || null;
+  const round = roundStore.createRound({ ownerUid });
 
   // The store refuses new rounds rather than terminating rounds that players are
   // still playing (ISSUE-23). Surface that as a retryable capacity error instead
@@ -85,7 +90,11 @@ router.post('/start', startRateLimiter, (req, res) => {
 });
 
 // POST /api/game/guess - the client sends ONLY { roundId, guess }.
-router.post('/guess', (req, res) => {
+//
+// optionalAuth (never rejecting) is what makes the result scoreable: a guest
+// round is resolved but unscored, an authenticated round is credited to the uid
+// that created it.
+router.post('/guess', optionalAuth, async (req, res) => {
   const { roundId, guess } = req.body;
   const parsedGuess = parseIntegerInRange(guess, 1, 100);
 
@@ -102,6 +111,63 @@ router.post('/guess', (req, res) => {
   if (!outcome) {
     return res.status(404).json({ ok: false, message: 'Unknown or expired round. Start a new round.' });
   }
+
+  // Ownership: a round bound to a player may only be played by that player, so a
+  // leaked round id cannot be used to burn someone else's attempts or finish
+  // their round. Guest rounds (no owner) stay playable by anyone, as before.
+  const requesterUid = (req.user && req.user.uid) || null;
+  if (outcome.ownerUid && outcome.ownerUid !== requesterUid) {
+    return res.status(403).json({ ok: false, message: 'This round belongs to another player.' });
+  }
+
+  // Score exactly once, on the transition to a win. `attemptsUsedNow` is 0 for
+  // any request against an already-finished round, so replaying the winning
+  // request cannot award twice.
+  const shouldScore = Boolean(outcome.ownerUid) && outcome.attemptsUsedNow === 1;
+
+  if (shouldScore) {
+    const won = outcome.result === 'correct';
+
+    try {
+      const result = await scoring.recordRoundResult({
+        uid: outcome.ownerUid,
+        attempts: outcome.attempts,
+        won,
+        displayName: resolveDisplayName(req.user),
+      });
+
+      if (result) {
+        Object.assign(outcome, {
+          awarded: result.awarded,
+          score: result.score,
+          bestScore: result.bestScore,
+          streak: result.streak,
+          newPersonalBest: result.newPersonalBest,
+          scored: true,
+        });
+
+        // The documented product is a realtime leaderboard; push the new ranking
+        // so other clients do not wait for a manual refresh.
+        const io = req.app.get('io');
+        if (io) {
+          const users = await storage.getUsers();
+          io.to('global-chat').emit('leaderboard-update', {
+            leaderboard: scoring.buildLeaderboard(users),
+            at: Date.now(),
+          });
+        }
+      }
+    } catch (error) {
+      // A scoring failure must never turn a completed round into an error for
+      // the player: the guess itself succeeded and is already resolved in the
+      // store. Report the round outcome unscored and keep the failure visible.
+      console.error('game/guess: failed to record score', error && error.message);
+      Object.assign(outcome, { scored: false });
+    }
+  }
+
+  // The owner binding is internal bookkeeping and is never serialised.
+  delete outcome.ownerUid;
 
   return res.json({ ok: true, ...outcome });
 });

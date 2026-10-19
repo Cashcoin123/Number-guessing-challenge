@@ -127,8 +127,48 @@ Response:
 ```
 `secretNumber` is only included once the round is `correct` or `round-over`.
 
+#### Scoring (server-authoritative)
+
+A round created by an **authenticated** caller is scored on the server. The
+player is credited against the identity that created the round; the request body
+cannot name the uid to credit and cannot supply the attempt count. The winning
+response carries the award and the resulting totals:
+
+```json
+{
+  "ok": true,
+  "result": "correct",
+  "attempts": 3,
+  "maxAttempts": 10,
+  "remaining": 7,
+  "secretNumber": 42,
+  "scored": true,
+  "awarded": 76,
+  "score": 76,
+  "bestScore": 76,
+  "streak": 1,
+  "newPersonalBest": true
+}
+```
+
+Points are `max(20, 100 - attempts * 8)`, so a win is worth at least 20 and a
+first-guess win is worth 92. The attempt that ends a losing round is also scored
+(`awarded: 0`) because it counts as a played game and resets the streak.
+
+Behaviour that callers can rely on:
+
+- a **guest** round (no token) resolves exactly as before but is never scored;
+the response simply omits `scored`/`awarded`;
+- a win is awarded **exactly once** - replaying the winning request resolves as
+`round-over` with no `scored` field and does not change the stored totals;
+- a round bound to a player returns `403` to any other caller, so a leaked
+`roundId` cannot be used to burn another player's attempts;
+- after a scored round the server pushes a `leaderboard-update` event to the
+global chat room.
+
 Errors: `400` when `roundId` is missing or `guess` is not an integer in
-`1..100`; `404` when the round id is unknown or has expired.
+`1..100`; `403` when the round belongs to another player; `404` when the round id
+is unknown or has expired.
 
 ### Claim Daily Bonus
 ```
@@ -219,6 +259,16 @@ const socket = io(API_URL, { auth: { token: firebaseIdToken } });
 ```javascript
 socket.emit('join-chat');
 socket.on('chat-message', (message) => console.log(message));
+```
+
+### Leaderboard Update (server to client)
+Emitted to the `global-chat` room after a scored round, carrying the same shape
+as `GET /leaderboard` so a client can replace its table without re-fetching.
+```javascript
+socket.on('leaderboard-update', (payload) => console.log(payload.leaderboard));
+```
+```json
+{ "leaderboard": [ { "rank": 1, "username": "Player1", "bestScore": 76, "streak": 1, "messagesSent": 0 } ], "at": 1695916800000 }
 ```
 
 ### Send Message
