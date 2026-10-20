@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import { API_BASE } from './env';
+import {
+  createAuthClient,
+  subscribeToIdentity,
+  getAuthToken,
+  signUpWithEmail,
+  signInWithEmail,
+  signOut as signOutOfFirebase,
+  describeAuthError,
+  GUEST,
+} from './auth';
+import { isFirebaseConfigured } from './firebaseConfig';
 
 // Vite exposes client env vars via import.meta.env and only inlines those with a
-// VITE_ prefix. The previous code read process.env.REACT_APP_API_URL, which is
-// undefined in a Vite build, so the built app always fell back to localhost.
-//
-// Dev: base '' (relative URLs) so vite.config.js proxies /api and /socket.io to
-// the backend. Prod: set VITE_API_URL at build time for a separate API origin.
-const API_URL = import.meta.env.VITE_API_URL ?? '';
+// VITE_ prefix. Dev: '' (relative URLs) so vite.config.js proxies /api and
+// /socket.io to the backend. Prod: set VITE_API_URL at build time.
+const API_URL = API_BASE;
 
 const api = (path) => `${API_URL}${path}`;
 
@@ -32,8 +41,26 @@ function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [leaderboard, setLeaderboard] = useState([]);
   const [dailyBonusText, setDailyBonusText] = useState('Checking bonus...');
+  const [bonusAvailable, setBonusAvailable] = useState(false);
   const [tab, setTab] = useState('game');
   const socketRef = useRef(null);
+
+  // --- Authentication state --------------------------------------------------
+  // `session.mode`: 'guest' | 'injected' | 'firebase'. The app is fully usable in
+  // guest mode (that is the default local/CI case with no Firebase project), but
+  // protected actions then correctly report that a sign-in is required instead of
+  // failing with an opaque 401.
+  const [session, setSession] = useState(GUEST);
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const authClientRef = useRef(null);
+
+  // Identity generation counter: bumped on every identity change so an in-flight
+  // socket connect for a stale identity cannot install itself.
+  const identitySeq = useRef(0);
 
   const primaryButtonStyle = useMemo(
     () => ({
@@ -47,6 +74,26 @@ function App() {
     }),
     []
   );
+
+  const isSignedIn = session.mode !== 'guest';
+
+  /**
+   * Authenticated fetch.
+   *
+   * The token is resolved per request: Firebase ID tokens expire (~1h), so a
+   * cached string would eventually 401 every call. Requests with no identity are
+   * still sent, unauthenticated, so public routes and guest play are unaffected.
+   */
+  const authFetch = useCallback(async (path, options = {}) => {
+    const token = await getAuthToken(authClientRef.current);
+    const headers = { ...(options.headers || {}) };
+
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    return fetch(api(path), { ...options, headers });
+  }, []);
 
   const loadChatMessages = useCallback(() => {
     fetch(api('/api/chat/messages'))
@@ -62,97 +109,201 @@ function App() {
       .catch(() => setLeaderboard([]));
   }, []);
 
-  const loadGameStats = useCallback(() => {
-    fetch(api('/api/game/stats'))
-      .then((res) => res.json())
-      .then((data) => {
-        const stats = data.stats || {};
-        setBestScore(stats.bestScore || 0);
-        setStreak(stats.streak || 0);
-      })
-      .catch(() => {});
-  }, []);
+  // The player's own HUD. This is identity-scoped, so it is read from the stored
+  // profile (authenticated) rather than the global aggregate stats: a signed-in
+  // player must see THEIR totals, and a guest must see zeros rather than someone
+  // else's numbers.
+  const loadGameStats = useCallback(async () => {
+    if (session.mode !== 'firebase' || !session.uid) {
+      setBestScore(0);
+      setStreak(0);
+      setScore(0);
+      return;
+    }
+
+    try {
+      const res = await authFetch(`/api/users/${session.uid}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const user = (data && data.user) || {};
+      setScore(Number(user.score || 0));
+      setBestScore(Number(user.bestScore || 0));
+      setStreak(Number(user.streak || 0));
+    } catch (error) {
+      /* leave the HUD as-is on a transient failure */
+    }
+  }, [session.mode, session.uid, authFetch]);
+
+  // Bonus state is READ, never claimed, while rendering. The previous code POSTed
+  // to the claim endpoint on mount, which spent the player's daily bonus as a side
+  // effect of opening the page.
+  //
+  // This runs for the injected-token escape hatch too, not just for a real Firebase
+  // session: the route derives the uid from the token itself, so the client needs
+  // no uid to read or claim the bonus. Gating it on a Firebase-only session would
+  // leave the escape hatch unable to use a fully server-authoritative feature.
+  const loadBonusState = useCallback(async () => {
+    if (session.mode === 'guest') {
+      setBonusAvailable(false);
+      setDailyBonusText('Sign in to claim');
+      return;
+    }
+
+    try {
+      const res = await authFetch('/api/game/bonus');
+      if (!res.ok) {
+        setBonusAvailable(false);
+        setDailyBonusText('Bonus unavailable');
+        return;
+      }
+      const data = await res.json();
+      setBonusAvailable(Boolean(data.available));
+
+      if (data.available) {
+        setDailyBonusText('Daily bonus available');
+      } else {
+        const remaining = Math.max(0, Number(data.nextAvailableAt || 0) - Date.now());
+        const hours = Math.floor(remaining / 3600000);
+        const mins = Math.floor((remaining % 3600000) / 60000);
+        setDailyBonusText(`Next bonus in ${hours}h ${mins}m`);
+      }
+
+      // Render the server's authoritative totals.
+      if (typeof data.score === 'number') setScore(data.score);
+      if (typeof data.bestScore === 'number') setBestScore(data.bestScore);
+      if (typeof data.streak === 'number') setStreak(data.streak);
+    } catch (error) {
+      setDailyBonusText('Bonus unavailable');
+    }
+  }, [session.mode, authFetch]);
 
   const refresh = useCallback(() => {
     loadChatMessages();
     loadLeaderboard();
     loadGameStats();
-  }, [loadChatMessages, loadLeaderboard, loadGameStats]);
+    loadBonusState();
+  }, [loadChatMessages, loadLeaderboard, loadGameStats, loadBonusState]);
 
-  // Realtime chat. The socket must carry the same credentials as REST calls;
-  // in local development the server-issued bearer token is optional.
+  // --- Boot auth once --------------------------------------------------------
   useEffect(() => {
-    refresh();
+    let unsubscribe = () => {};
+    let cancelled = false;
 
-    const token = (() => {
-      try {
-        return localStorage.getItem('ngc-token') || undefined;
-      } catch (error) {
-        return undefined;
+    createAuthClient().then((client) => {
+      if (cancelled) return;
+      authClientRef.current = client;
+
+      if (client.error) {
+        // Configured but broken: stay in guest mode and say so plainly.
+        setAuthError(`Authentication unavailable: ${client.error}`);
       }
-    })();
 
-    const socket = io(API_URL || undefined, { auth: token ? { token } : {} });
-    socketRef.current = socket;
+      unsubscribe = subscribeToIdentity(client, (next) => {
+        identitySeq.current += 1;
+        setSession(next);
+        setAuthReady(true);
+      });
 
-    socket.on('chat-message', (entry) => {
-      setChatMessages((current) => [...current, entry].slice(-20));
-    });
-
-    // The leaderboard is documented as realtime. The server pushes the new
-    // ranking after a scored round, so other clients update without polling.
-    socket.on('leaderboard-update', (payload) => {
-      if (payload && Array.isArray(payload.leaderboard)) {
-        setLeaderboard(payload.leaderboard);
-      }
+      // No SDK / no project: subscribeToIdentity has already reported guest (or an
+      // injected token) synchronously, but make sure the UI leaves its loading
+      // state even if that path ever changes.
+      if (!client.configured) setAuthReady(true);
     });
 
     return () => {
-      socket.disconnect();
+      cancelled = true;
+      unsubscribe();
     };
-  }, [refresh]);
+  }, []);
+
+  // Refresh the player's data whenever the identity changes, so the HUD shows the
+  // signed-in player's totals instead of guest zeros (and reverts on sign-out).
+  useEffect(() => {
+    if (!authReady) return;
+    loadGameStats();
+    loadBonusState();
+    loadLeaderboard();
+  }, [authReady, session.mode, session.uid, loadGameStats, loadBonusState, loadLeaderboard]);
+
+  // --- Realtime -------------------------------------------------------------
+  // The socket must carry the SAME identity as REST. It is rebuilt whenever the
+  // identity changes, because a persistent socket would otherwise keep the old
+  // uid bound server-side: signing out (or switching accounts) would leave the
+  // connection authenticated as the previous player, which is a real
+  // impersonation hazard for chat.
+  useEffect(() => {
+    if (!authReady) return undefined;
+
+    let cancelled = false;
+    let socket = null;
+    const seq = identitySeq.current;
+
+    (async () => {
+      const token = await getAuthToken(authClientRef.current);
+
+      // A newer identity appeared while the token was being fetched.
+      if (cancelled || seq !== identitySeq.current) return;
+
+      socket = io(API_URL || undefined, {
+        auth: token ? { token } : {},
+        // Do not queue sends across an auth change; a stale identity's message
+        // must not be delivered under the new session.
+        reconnection: true,
+      });
+
+      socketRef.current = socket;
+
+      socket.on('chat-message', (entry) => {
+        setChatMessages((current) => [...current, entry].slice(-20));
+      });
+
+      // The leaderboard is documented as realtime; the server pushes the new
+      // ranking after a scored round or a granted bonus.
+      socket.on('leaderboard-update', (payload) => {
+        if (payload && Array.isArray(payload.leaderboard)) {
+          setLeaderboard(payload.leaderboard);
+        }
+      });
+
+      socket.on('connect_error', (error) => {
+        // Guests have no token, so the server rejects the handshake by design. That
+        // is expected, not an error worth showing: REST reads (chat, leaderboard)
+        // are public and keep working.
+        if (token && identitySeq.current === seq) {
+          setMessage(`Realtime connection failed: ${(error && error.message) || 'unauthorized'}`);
+        }
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      if (socket) socket.disconnect();
+      if (socketRef.current === socket) socketRef.current = null;
+    };
+  }, [authReady, session.mode, session.uid]);
 
   const newRound = async () => {
     try {
-      const res = await fetch(api('/api/game/start'), { method: 'POST' });
+      // Authenticated when possible: a round created with a token is bound to the
+      // player, which is what makes the eventual win scoreable (ISSUE-24).
+      const res = await authFetch('/api/game/start', { method: 'POST' });
       const data = await res.json();
       if (!data.ok) throw new Error(data.message || 'Could not start a round.');
       setRoundId(data.round.roundId);
       setMaxAttempts(data.round.maxAttempts || 10);
       setAttempts(0);
       setGuess('');
-      setMessage('New round started. Enter your guess.');
+      setMessage(
+        isSignedIn
+          ? 'New round started. Enter your guess.'
+          : 'New round started (guest round - sign in to score). Enter your guess.'
+      );
     } catch (error) {
       setMessage('Could not start a round. Is the API running?');
     }
   };
 
-  // Ask the server what the bonus state is for this identity.
-  useEffect(() => {
-    let active = true;
-    fetch(api('/api/game/bonus'), { method: 'POST' })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!active || !data) {
-          setDailyBonusText('Sign in to claim');
-          return;
-        }
-        if (data.granted) {
-          setDailyBonusText('Daily bonus available');
-        } else {
-          const remaining = Math.max(0, Number(data.nextAvailableAt || 0) - Date.now());
-          const hours = Math.floor(remaining / 3600000);
-          const mins = Math.floor((remaining % 3600000) / 60000);
-          setDailyBonusText(`Next bonus in ${hours}h ${mins}m`);
-        }
-      })
-      .catch(() => setDailyBonusText('Bonus unavailable'));
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const saveUsername = () => {
+  const saveUsername = async () => {
     const trimmed = username.trim();
     if (!trimmed) return;
 
@@ -162,29 +313,62 @@ function App() {
       /* ignore storage failures */
     }
 
-    fetch(api('/api/users/register'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: trimmed }),
-    }).catch(() => {});
+    if (!isSignedIn) {
+      setMessage('Username saved locally. Sign in to register it on the server.');
+      return;
+    }
+
+    try {
+      const res = await authFetch('/api/users/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: trimmed }),
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        setMessage(`Username registered as ${data.user.username}.`);
+        loadLeaderboard();
+      } else {
+        setMessage(data.message || 'Could not register that username.');
+      }
+    } catch (error) {
+      setMessage('Registration unavailable.');
+    }
   };
 
   const claimDailyBonus = async () => {
+    if (!isSignedIn) {
+      setMessage('Sign in to claim the daily bonus.');
+      return;
+    }
+
     try {
-      const response = await fetch(api('/api/game/bonus'), { method: 'POST' });
+      const response = await authFetch('/api/game/bonus', { method: 'POST' });
       const data = await response.json();
 
       if (data.granted) {
-        const next = score + Number(data.bonus || 0);
-        setScore(next);
-        setBestScore((current) => Math.max(current, next));
+        // Server-authoritative: render the authoritative totals rather than
+        // adding the bonus to local state, which is what made the award vanish on
+        // reload and never reach the leaderboard.
+        if (typeof data.score === 'number') setScore(data.score);
+        if (typeof data.bestScore === 'number') setBestScore(data.bestScore);
+        if (typeof data.streak === 'number') setStreak(data.streak);
+
+        setBonusAvailable(false);
         setMessage(`🎁 Daily bonus claimed: +${data.bonus} points!`);
         setDailyBonusText('Bonus claimed today');
+        loadLeaderboard();
       } else {
+        if (typeof data.score === 'number') setScore(data.score);
+        if (typeof data.bestScore === 'number') setBestScore(data.bestScore);
+
         const remaining = Math.max(0, Number(data.nextAvailableAt || 0) - Date.now());
         const hours = Math.floor(remaining / 3600000);
         const mins = Math.floor((remaining % 3600000) / 60000);
+        setBonusAvailable(false);
         setMessage(`Bonus not ready. Next in ${hours}h ${mins}m.`);
+        setDailyBonusText(`Next bonus in ${hours}h ${mins}m`);
       }
     } catch (error) {
       setMessage('Bonus service unavailable.');
@@ -205,7 +389,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(api('/api/game/guess'), {
+      const response = await authFetch('/api/game/guess', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roundId, guess: parsedGuess }),
@@ -225,10 +409,9 @@ function App() {
       } else if (data.result === 'too-high') {
         setMessage('📈 Too high! Try again.');
       } else if (data.result === 'correct') {
-        // The server now owns scoring: it awards points on the winning guess
-        // and returns the authoritative totals. The SPA must render those
-        // values, not compute its own, or the HUD and the leaderboard drift
-        // apart. A guest round (or a failed award) is explicitly unscored.
+        // The server owns scoring and returns the authoritative totals; the SPA
+        // renders those rather than computing its own, or the HUD and the
+        // leaderboard drift apart. A guest round is explicitly unscored.
         const points = data.scored ? Number(data.awarded || 0) : 0;
         const nextScore = data.scored ? Number(data.score || 0) : score;
         setScore(nextScore);
@@ -239,7 +422,7 @@ function App() {
         setMessage(
           data.scored
             ? `You won ${points} points!`
-            : `Correct! Sign in to record your score on the leaderboard.`
+            : 'Correct! Sign in to record your score on the leaderboard.'
         );
         setRoundId(null);
         loadLeaderboard();
@@ -259,17 +442,24 @@ function App() {
     const text = window.prompt('Write a message:');
     if (!text || !text.trim()) return;
 
+    if (!isSignedIn) {
+      setMessage('Sign in to join the global chat.');
+      return;
+    }
+
     const socket = socketRef.current;
 
-    // Prefer the realtime channel when it is connected, otherwise fall back to
-    // the REST endpoint.
+    // The payload carries ONLY the message text. The server derives the sender's
+    // display name (a uid pseudonym) and score from the authenticated identity, so
+    // the client must not send username or score: sending the player's email as a
+    // handle is exactly the PII leak ISSUE-22 fixed.
     if (socket && socket.connected) {
       socket.emit('send-message', { message: text.trim() });
       return;
     }
 
     try {
-      const res = await fetch(api('/api/chat/send'), {
+      const res = await authFetch('/api/chat/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text.trim() }),
@@ -285,9 +475,110 @@ function App() {
     }
   };
 
+  const submitAuth = async (mode) => {
+    const client = authClientRef.current;
+
+    if (!client || !client.configured) {
+      setAuthError('Firebase Authentication is not configured for this build.');
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthError('');
+
+    try {
+      if (mode === 'signup') {
+        await signUpWithEmail(client, email.trim(), password);
+      } else {
+        await signInWithEmail(client, email.trim(), password);
+      }
+      // onAuthStateChanged drives the rest; the identity effect reloads data.
+      setPassword('');
+      setMessage('Signed in. Your rounds, bonus and chat are now scored.');
+    } catch (error) {
+      setAuthError(describeAuthError(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setAuthBusy(true);
+    try {
+      await signOutOfFirebase(authClientRef.current);
+      setScore(0);
+      setBestScore(0);
+      setStreak(0);
+      setMessage('Signed out. You are now playing as a guest.');
+    } catch (error) {
+      setAuthError('Sign-out failed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const sessionLabel = useMemo(() => {
+    if (session.mode === 'firebase') return `Signed in as ${session.label}`;
+    if (session.mode === 'injected') return 'Signed in with an injected token';
+    return 'Guest - not signed in';
+  }, [session]);
+
   return (
     <div style={{ maxWidth: 1000, margin: '0 auto', padding: 20, background: '#0f172a', color: '#f8fafc', fontFamily: 'Arial, sans-serif', minHeight: '100vh' }}>
-      <h1 style={{ textAlign: 'center', marginBottom: 24 }}>🎮 Number Guessing Challenge</h1>
+      <h1 style={{ textAlign: 'center', marginBottom: 12 }}>🎮 Number Guessing Challenge</h1>
+
+      {/* Session bar. The signed-out state is stated plainly rather than left
+          implicit, because a signed-out player silently scores nothing. */}
+      <div style={{ background: '#111827', border: '1px solid #334155', borderRadius: 12, padding: 14, marginBottom: 18 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <strong style={{ color: isSignedIn ? '#86efac' : '#fca5a5' }}>{sessionLabel}</strong>
+            {!isFirebaseConfigured && (
+              <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 6 }}>
+                Firebase is not configured for this build, so sign-in is unavailable and the
+                game runs in guest mode. Set VITE_FIREBASE_API_KEY and VITE_FIREBASE_PROJECT_ID
+                (see frontend/.env.example) to enable accounts.
+              </div>
+            )}
+            {isFirebaseConfigured && authError && (
+              <div style={{ color: '#fca5a5', fontSize: 12, marginTop: 6 }}>{authError}</div>
+            )}
+          </div>
+          {isSignedIn && (
+            <button onClick={handleSignOut} disabled={authBusy} style={{ ...primaryButtonStyle, background: '#475569' }}>
+              Sign out
+            </button>
+          )}
+        </div>
+
+        {!isSignedIn && isFirebaseConfigured && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email"
+              autoComplete="email"
+              style={{ flex: 1, minWidth: 180, borderRadius: 10, padding: '10px 12px', border: '1px solid #334155', background: '#1e293b', color: '#fff' }}
+            />
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Password"
+              autoComplete="current-password"
+              onKeyDown={(e) => e.key === 'Enter' && submitAuth('signin')}
+              style={{ flex: 1, minWidth: 180, borderRadius: 10, padding: '10px 12px', border: '1px solid #334155', background: '#1e293b', color: '#fff' }}
+            />
+            <button onClick={() => submitAuth('signin')} disabled={authBusy} style={primaryButtonStyle}>
+              Sign in
+            </button>
+            <button onClick={() => submitAuth('signup')} disabled={authBusy} style={{ ...primaryButtonStyle, background: '#22c55e' }}>
+              Create account
+            </button>
+          </div>
+        )}
+      </div>
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
         <input
@@ -303,7 +594,7 @@ function App() {
         <StatCard label="Score" value={score} accent="#facc15" />
         <StatCard label="Best" value={bestScore} accent="#86efac" />
         <StatCard label="Streak" value={streak} accent="#93c5fd" />
-        <StatCard label="Bonus" value={dailyBonusText} accent="#fca5a5" />
+        <StatCard label="Bonus" value={dailyBonusText} accent={bonusAvailable ? '#22c55e' : '#fca5a5'} />
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 20, borderBottom: '1px solid #334155', paddingBottom: 12 }}>
@@ -334,7 +625,21 @@ function App() {
             />
             <button onClick={submitGuess} style={primaryButtonStyle}>Guess</button>
             <button onClick={newRound} style={{ background: '#0ea5e9', color: '#fff', border: 'none', borderRadius: 10, padding: '12px 18px', cursor: 'pointer', fontWeight: 700 }}>New Round</button>
-            <button onClick={claimDailyBonus} style={{ background: '#22c55e', color: '#fff', border: 'none', borderRadius: 10, padding: '12px 18px', cursor: 'pointer', fontWeight: 700 }}>Daily Bonus</button>
+            <button
+              onClick={claimDailyBonus}
+              disabled={!isSignedIn || !bonusAvailable}
+              style={{
+                background: !isSignedIn || !bonusAvailable ? '#334155' : '#22c55e',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 10,
+                padding: '12px 18px',
+                cursor: !isSignedIn || !bonusAvailable ? 'not-allowed' : 'pointer',
+                fontWeight: 700,
+              }}
+            >
+              Daily Bonus
+            </button>
           </div>
         </div>
       )}
@@ -350,7 +655,9 @@ function App() {
               </div>
             ))}
           </div>
-          <button onClick={sendChatMessage} style={{ ...primaryButtonStyle, background: '#8b5cf6', width: '100%' }}>Send Chat Message</button>
+          <button onClick={sendChatMessage} style={{ ...primaryButtonStyle, background: isSignedIn ? '#8b5cf6' : '#334155', width: '100%' }}>
+            {isSignedIn ? 'Send Chat Message' : 'Sign in to chat'}
+          </button>
         </div>
       )}
 
@@ -381,7 +688,9 @@ function StatCard({ label, value, accent }) {
   return (
     <div style={{ background: '#111827', borderRadius: 12, padding: 16, border: `2px solid ${accent}` }}>
       <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 8 }}>{label}</div>
-      <div style={{ fontWeight: 700, fontSize: 28, color: accent }}>{value}</div>
+      {/* data-stat is a stable hook so tests and operators can read the rendered
+          value without scraping presentational text. */}
+      <div data-stat={label} style={{ fontWeight: 700, fontSize: 28, color: accent }}>{value}</div>
     </div>
   );
 }
