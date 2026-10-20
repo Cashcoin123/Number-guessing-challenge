@@ -220,6 +220,23 @@ async function saveBonusRecord(userId, record) {
   writeJson(BONUS_FILE, records);
 }
 
+// Remove a uid's bonus record. Used only to roll back a claim whose credit did
+// not persist, so a failed claim does not consume the player's 24-hour window.
+async function clearBonusRecord(userId) {
+  if (!userId) {
+    return;
+  }
+
+  if (USE_FIREBASE && firebaseDb) {
+    await firebaseDb.collection('bonuses').doc(userId).delete();
+    return;
+  }
+
+  const records = readJson(BONUS_FILE, {});
+  delete records[userId];
+  writeJson(BONUS_FILE, records);
+}
+
 module.exports = {
   getUsers,
   saveUsers,
@@ -232,4 +249,5 @@ module.exports = {
   getBonusRecords,
   getBonusRecord,
   saveBonusRecord,
+  clearBonusRecord,
 };

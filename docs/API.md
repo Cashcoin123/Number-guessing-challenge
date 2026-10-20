@@ -20,8 +20,13 @@ The API is **fail-closed**: a protected endpoint without a valid token returns
 `NODE_ENV` != `production`) injects a local development identity so the web app
 works without Firebase. See `backend/.env.example`.
 
-Protected endpoints: `POST /game/bonus`, `POST /chat/send`,
-`POST /users/register`, `GET /users/:id`.
+Protected endpoints: `POST /game/bonus`, `GET /game/bonus`,
+`POST /chat/send`, `POST /users/register`, `GET /users/:id`.
+
+The browser client obtains its identity from Firebase Authentication and sends a
+fresh ID token on every authenticated request (tokens expire, so the client asks
+the SDK for a current one per call rather than caching the string). The Socket.IO
+handshake carries the same token. See `frontend/.env.example`.
 
 ## Game Routes
 
@@ -174,11 +179,68 @@ is unknown or has expired.
 ```
 POST /game/bonus      (authenticated)
 ```
-The 24-hour cooldown is tracked **per authenticated user**.
+The 24-hour cooldown is tracked **per authenticated user**. The award is
+**server-authoritative**: the points are credited to the stored `score` and
+`bestScore` of the uid in the verified token, so the total survives a reload and
+appears on the leaderboard. The response carries the authoritative totals; a
+client must render them rather than adding the bonus to local state.
+
+A bonus never changes `streak` (a streak counts consecutive wins).
+
+Response (granted):
+```json
+{
+  "ok": true,
+  "granted": true,
+  "bonus": 50,
+  "score": 250,
+  "bestScore": 400,
+  "streak": 3,
+  "nextAvailableAt": 1695916800000,
+  "username": "Player-a7d75d"
+}
+```
+
+Response (not due - still carries the stored totals):
+```json
+{
+  "ok": true,
+  "granted": false,
+  "bonus": 0,
+  "score": 250,
+  "bestScore": 400,
+  "streak": 3,
+  "nextAvailableAt": 1695916800000
+}
+```
+
+Awarding is bound to the identity in the token: the uid and the awarded value can
+never come from the request body. A claim is granted **exactly once** per window;
+concurrent claims for one uid are serialised, and a credit that fails to persist
+rolls the window back so the bonus stays claimable. `500` is returned when the
+credit could not be written.
+
+After a granted bonus the server emits `leaderboard-update` to the global chat
+room, for the same reason a scored round does: the ranking just changed.
+
+### Get Daily Bonus State
+```
+GET /game/bonus      (authenticated)
+```
+Reports availability **without claiming**. Reading this must never award
+anything, which is why status and claim are separate routes.
 
 Response:
 ```json
-{ "ok": true, "granted": true, "bonus": 50, "nextAvailableAt": 1695916800000 }
+{
+  "ok": true,
+  "available": true,
+  "bonus": 50,
+  "nextAvailableAt": 1695916800000,
+  "score": 250,
+  "bestScore": 400,
+  "streak": 3
+}
 ```
 
 ## Chat Routes

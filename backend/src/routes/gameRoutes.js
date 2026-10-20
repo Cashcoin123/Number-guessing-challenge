@@ -3,6 +3,7 @@ const express = require('express');
 const storage = require('../services/storage');
 const roundStore = require('../services/roundStore');
 const scoring = require('../services/scoring');
+const bonus = require('../services/bonus');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { createRateLimiter } = require('../middleware/rateLimit');
 const { parseIntegerInRange, resolveDisplayName } = require('../utils/helpers');
@@ -23,7 +24,6 @@ const startRateLimiter = createRateLimiter({
   max: Number(process.env.ROUNDS_RATE_MAX) || undefined,
 });
 
-const BONUS_WINDOW_MS = 24 * 60 * 60 * 1000;
 const CAPACITY_LOG_INTERVAL_MS = 30 * 1000;
 
 // Log capacity refusals at most once per interval. A flood of anonymous
@@ -41,7 +41,6 @@ function logCapacityRefusal(stats) {
     `game/start refused: round store at capacity (${stats.active}/${stats.maxTracked} active rounds).`
   );
 }
-const DEFAULT_BONUS = 50;
 
 function clientRound(round) {
   return {
@@ -173,6 +172,13 @@ router.post('/guess', optionalAuth, async (req, res) => {
 });
 
 // POST /api/game/bonus - per-user daily bonus (ISSUE-8).
+//
+// The award is server-authoritative. Before this route used the bonus service it
+// only wrote the cooldown record and returned `{granted:true, bonus:50}`; the SPA
+// added the points to React state, so the bonus vanished on reload and could
+// never reach the leaderboard - the same class of defect ISSUE-24 fixed for round
+// scoring. The points are now credited to the stored record of the uid taken
+// from the verified token, and the response carries the authoritative totals.
 router.post('/bonus', requireAuth, async (req, res) => {
   const uid = req.user && req.user.uid;
 
@@ -180,26 +186,51 @@ router.post('/bonus', requireAuth, async (req, res) => {
     return res.status(401).json({ ok: false, message: 'Authentication required.' });
   }
 
-  const now = Date.now();
-  const record = await storage.getBonusRecord(uid);
-  const lastClaim = Number((record && record.lastClaim) || 0);
+  try {
+    const result = await bonus.claimDailyBonus({
+      uid,
+      // Server-derived pseudonym (ISSUE-22): never an email, never a body value.
+      displayName: resolveDisplayName(req.user),
+    });
 
-  if (!lastClaim || now - lastClaim >= BONUS_WINDOW_MS) {
-    await storage.saveBonusRecord(uid, { lastClaim: now });
-    return res.json({
-      ok: true,
-      granted: true,
-      bonus: DEFAULT_BONUS,
-      nextAvailableAt: now + BONUS_WINDOW_MS,
+    // Keep the documented realtime leaderboard correct after a granted bonus, for
+    // the same reason a scored round broadcasts: the ranking just changed.
+    if (result.granted) {
+      const io = req.app.get('io');
+      if (io) {
+        io.to('global-chat').emit('leaderboard-update', {
+          leaderboard: scoring.buildLeaderboard(result.users),
+          at: Date.now(),
+        });
+      }
+    }
+
+    // `users` is an internal broadcast payload and is never serialised.
+    const { users, ...body } = result;
+    return res.json({ ok: true, ...body });
+  } catch (error) {
+    console.error('game/bonus: failed to credit the daily bonus', error && error.message);
+    return res.status(500).json({
+      ok: false,
+      message: 'The bonus could not be credited. Please try again.',
     });
   }
+});
 
-  return res.json({
-    ok: true,
-    granted: false,
-    bonus: 0,
-    nextAvailableAt: lastClaim + BONUS_WINDOW_MS,
-  });
+// GET /api/game/bonus - read the bonus state WITHOUT claiming it.
+//
+// The SPA used to discover its bonus state by POSTing to the claim endpoint while
+// rendering, which spent the bonus as a side effect of opening the page. Reporting
+// status must not award anything, so it lives on its own read-only route.
+router.get('/bonus', requireAuth, async (req, res) => {
+  const uid = req.user && req.user.uid;
+
+  if (!uid) {
+    return res.status(401).json({ ok: false, message: 'Authentication required.' });
+  }
+
+  const status = await bonus.getBonusStatus({ uid });
+  return res.json({ ok: true, ...status });
 });
 
 module.exports = router;
