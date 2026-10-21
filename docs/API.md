@@ -175,6 +175,39 @@ Errors: `400` when `roundId` is missing or `guess` is not an integer in
 `1..100`; `403` when the round belongs to another player; `404` when the round id
 is unknown or has expired.
 
+#### Sharing a result (web client, no API involved)
+
+The web app can share a finished round. There is no sharing endpoint - it is a
+client-side affordance over the `POST /game/guess` response, and it adds no
+network call of its own.
+
+The shared text quotes these response fields and nothing else:
+
+| Response field | Where it appears |
+| --- | --- |
+| `attempts`, `maxAttempts` | "in N of M attempts" |
+| `awarded` | "scored N points" (scored wins only) |
+| `score`, `bestScore`, `streak` | "total N, best N, streak N" |
+
+The ladder's numbers are never recomputed on the client, so the shared text
+cannot disagree with the leaderboard. The identity cases are reported
+distinctly:
+
+- **scored win** (`scored: true`) - quotes the award and the resulting totals;
+- **guest win** (no `scored`, no totals) - states that the round was played as a
+  guest and that **no points were recorded**;
+- **out of attempts** - states the round ended and that the player **scored
+  nothing**, even when the server sends `awarded: 0`.
+
+Transport: `navigator.share` when the browser provides it, otherwise
+`navigator.clipboard.writeText`, otherwise the UI states that neither is
+available. A rejected clipboard write or a failed share sheet is reported as a
+failure - the client never reports a copy that did not happen and never falls
+back to `document.execCommand`. The link is `window.location.origin`; no domain is
+invented and no third-party sharing service is contacted. The text is bounded to
+280 characters and never includes an email address or any identity field other
+than the player's own chosen username.
+
 ### Claim Daily Bonus
 ```
 POST /game/bonus      (authenticated)

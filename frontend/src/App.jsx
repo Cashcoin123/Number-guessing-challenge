@@ -12,6 +12,13 @@ import {
   GUEST,
 } from './auth';
 import { isFirebaseConfigured } from './firebaseConfig';
+import {
+  buildShareText,
+  detectShareCapabilities,
+  chooseShareStrategy,
+  shareResult,
+  SHARE_STRATEGIES,
+} from './share';
 
 // Vite exposes client env vars via import.meta.env and only inlines those with a
 // VITE_ prefix. Dev: '' (relative URLs) so vite.config.js proxies /api and
@@ -43,6 +50,11 @@ function App() {
   const [dailyBonusText, setDailyBonusText] = useState('Checking bonus...');
   const [bonusAvailable, setBonusAvailable] = useState(false);
   const [tab, setTab] = useState('game');
+  // The last COMPLETED round, kept so its result can be shared. Only the guess
+  // response itself is stored, and the share text quotes its numbers; sharing is
+  // never offered for a hint, because a mid-round hint is not a result.
+  const [completedRound, setCompletedRound] = useState(null);
+  const [shareNotice, setShareNotice] = useState('');
   const socketRef = useRef(null);
 
   // --- Authentication state --------------------------------------------------
@@ -293,6 +305,10 @@ function App() {
       setMaxAttempts(data.round.maxAttempts || 10);
       setAttempts(0);
       setGuess('');
+      // A new round invalidates the previous result: offering to share a score
+      // that is no longer the round on screen would be misleading.
+      setCompletedRound(null);
+      setShareNotice('');
       setMessage(
         isSignedIn
           ? 'New round started. Enter your guess.'
@@ -426,10 +442,16 @@ function App() {
         );
         setRoundId(null);
         loadLeaderboard();
+        // Keep the server's own numbers for the share text. A guest win carries
+        // no totals and this record does not manufacture any.
+        setCompletedRound(data);
+        setShareNotice('');
       } else if (data.result === 'round-over') {
         setStreak(0);
         setMessage(`❌ Out of attempts! The number was ${data.secretNumber}.`);
         setRoundId(null);
+        setCompletedRound(data);
+        setShareNotice('');
       }
 
       setGuess('');
@@ -475,6 +497,41 @@ function App() {
     }
   };
 
+  // --- Social sharing --------------------------------------------------------
+  // The share text is composed from the guess response that the server returned,
+  // so it can only ever quote numbers the server produced. The origin is read
+  // here (the only browser object involved) and handed to the pure module, which
+  // is what keeps share.js testable under `node --test`.
+  const shareText = useMemo(() => {
+    if (!completedRound) return null;
+
+    let pageOrigin = '';
+    try {
+      pageOrigin = window.location.origin;
+    } catch (error) {
+      pageOrigin = '';
+    }
+
+    return buildShareText({ outcome: completedRound, username, origin: pageOrigin });
+  }, [completedRound, username]);
+
+  // Reported so the player is never left guessing: the three honest outcomes are
+  // "shared", "copied" and "this browser provides neither". Nothing here writes
+  // to the DOM directly, and no request or third-party endpoint is involved.
+  // Not memoised: it is a couple of typeof checks, and re-reading them on each
+  // render keeps the UI honest if a capability appears after first paint.
+  const shareCapability = chooseShareStrategy(detectShareCapabilities());
+
+  const handleShare = async () => {
+    if (!shareText) {
+      setShareNotice('Finish a round before sharing a result.');
+      return;
+    }
+
+    const outcome = await shareResult({ text: shareText });
+    setShareNotice(outcome.message);
+  };
+
   const submitAuth = async (mode) => {
     const client = authClientRef.current;
 
@@ -509,6 +566,10 @@ function App() {
       setScore(0);
       setBestScore(0);
       setStreak(0);
+      // The completed round belonged to the identity that just signed out, so its
+      // result must not remain shareable as if it were the new session's.
+      setCompletedRound(null);
+      setShareNotice('');
       setMessage('Signed out. You are now playing as a guest.');
     } catch (error) {
       setAuthError('Sign-out failed.');
@@ -613,6 +674,48 @@ function App() {
               </div>
             )}
           </div>
+
+          {/* Share panel. Rendered only once a round has actually finished, so
+              there is never a share affordance for a hint. The text is a React
+              text child (never innerHTML), it quotes the server's numbers only,
+              and the button states exactly what will happen. */}
+          {completedRound && (
+            <div
+              data-testid="share-panel"
+              style={{ background: '#111827', borderRadius: 14, padding: 18, marginBottom: 20, border: '1px solid #334155' }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>Share your result</div>
+              <div
+                data-testid="share-text"
+                style={{ background: '#0f172a', borderRadius: 10, padding: 12, color: '#e2e8f0', fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+              >
+                {shareText}
+              </div>
+              <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 8 }}>
+                {shareCapability === SHARE_STRATEGIES.WEB_SHARE
+                  ? 'Uses your device share sheet; the link is this app\u2019s address.'
+                  : shareCapability === SHARE_STRATEGIES.CLIPBOARD
+                    ? 'Copies the text to your clipboard; the link is this app\u2019s address.'
+                    : 'This browser provides neither a share sheet nor clipboard access, so copy the text above manually.'}
+              </div>
+              <button
+                onClick={handleShare}
+                data-testid="share-button"
+                style={{ ...primaryButtonStyle, background: '#a855f7', marginTop: 12 }}
+              >
+                {shareCapability === SHARE_STRATEGIES.WEB_SHARE
+                  ? 'Share result'
+                  : shareCapability === SHARE_STRATEGIES.CLIPBOARD
+                    ? 'Copy result'
+                    : 'Share unavailable'}
+              </button>
+              {shareNotice && (
+                <div data-testid="share-notice" style={{ color: '#94a3b8', fontSize: 12, marginTop: 8 }}>
+                  {shareNotice}
+                </div>
+              )}
+            </div>
+          )}
 
           <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
             <input

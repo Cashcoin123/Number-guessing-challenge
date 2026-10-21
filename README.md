@@ -17,6 +17,20 @@ A global multiplayer number guessing game with live chat, scoring, daily bonuses
 - Player profiles
 - Message history
 
+✅ **Social sharing (web)**
+- Share a finished round - a win or a loss - from the web app
+- Uses the device share sheet (Web Share API) where the browser provides it,
+  otherwise copies the text to the clipboard
+- The shared text quotes the server's own numbers only: attempts, points awarded,
+  total, best and streak. A guest round says plainly that no points were
+  recorded, and a lost round never claims points
+- The link is the app's own page address. No shortened link, third-party sharing
+  endpoint or tracker is involved
+- A browser that offers neither a share sheet nor clipboard access says so in the
+  UI instead of appearing to do nothing
+- Requires the page to be focused for the clipboard path; mobile Safari and
+  Chrome use the native share sheet, which needs no permission
+
 ✅ **Cross-Platform**
 - Web app (React + Vite)
 - Mobile apps (React Native + Expo)
