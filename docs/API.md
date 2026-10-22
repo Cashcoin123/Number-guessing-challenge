@@ -343,6 +343,57 @@ Response:
 }
 ```
 
+## Mobile client
+
+`mobile/` is a client of this API, not a separate game. It uses the same routes as
+the web app; there is no mobile-only endpoint.
+
+| Flow | Request | Fields the client renders |
+| --- | --- | --- |
+| Session probe | `GET /game/bonus` | `score`, `bestScore`, `streak`, `available`; a `401` means **guest** |
+| Start a round | `POST /game/start` | `round.roundId`, `round.maxAttempts` |
+| Guess | `POST /game/guess` `{ roundId, guess }` | `result`, `attempts`, `maxAttempts`, `remaining`, and on a finished round `secretNumber`, `scored`, `awarded`, `score`, `bestScore`, `streak` |
+| Global stats | `GET /game/stats` | `bestScore`, `streak`, `totalGames` |
+| Leaderboard | `GET /leaderboard` | `rank`, `username`, `bestScore`, `streak` |
+| Chat | `GET /chat/messages` | `username`, `message` |
+| Daily bonus | `POST /game/bonus` | `granted`, `bonus`, `score`, `bestScore`, `streak` |
+
+Rules the mobile client follows, and that are covered by
+`mobile/test/gameClient.test.js`:
+
+- **The secret number comes from the server only.** The client has no
+  number-generation code and no field that could hold one; it copies
+  `secretNumber` only when the server includes it, which is only once a round is
+  `correct` or `round-over`. A start response that smuggled a number would still
+  have nowhere to go.
+- **Points come from the server only.** There is no scoring arithmetic in the
+  client. `awarded`, `score`, `bestScore` and `streak` are rendered exactly as
+  received; a response without them is treated as **unscored** rather than
+  completed with a plausible number.
+- **A loss is quoted, not computed.** On a loss the server sends `awarded: 0`
+  while the points formula would yield 20, so the loss screen is the observable
+  proof that the client is not recomputing anything.
+- **Guests are told the truth.** A guest round is playable, and the UI states
+  that no points were recorded — it never shows a guest a stored total.
+- **A failure is visible.** An unreachable backend produces an explicit
+  "the server cannot be reached" state and no way to start a round; an
+  unreadable body is reported as unreadable; an HTTP error surfaces the server's
+  own message.
+
+### API base URL
+
+There is no hardcoded host. Resolution order: `expo.extra.apiUrl`, then
+`EXPO_PUBLIC_API_URL`, then (web only) the app's own origin. A native build with
+none of these is a configuration error the UI reports. Details and examples are
+in [SETUP.md](SETUP.md#mobile-api-address).
+
+### Identity
+
+Scoring requires the server to resolve an identity. Locally that is the
+`ALLOW_DEV_AUTH=true` bypass (the server injects the identity) or an explicitly
+configured development token sent as `Authorization: Bearer <token>`. A token the
+server cannot verify is treated as a guest — the client cannot promote itself.
+
 ## WebSocket Events
 
 The Socket.IO handshake is authenticated with the same token:

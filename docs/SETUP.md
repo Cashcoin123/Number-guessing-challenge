@@ -36,6 +36,67 @@ npm install
 npx expo start
 ```
 
+The mobile app is a client of the same backend as the web app. It creates and
+resolves every round on the server and renders only the server's numbers, so it
+needs a reachable API — see [Mobile API address](#mobile-api-address) below.
+
+## Mobile API address
+
+The mobile app has **no hardcoded host**. It resolves its API base in this order:
+
+| Priority | Source | Use |
+| --- | --- | --- |
+| 1 | `expo.extra.apiUrl` in `mobile/app.json` | the documented place to ship an address |
+| 2 | `EXPO_PUBLIC_API_URL` in the environment | quick local override |
+| 3 | *(web only)* the app's own origin | a single-origin deployment needs no config |
+
+Example `mobile/app.json`:
+
+```json
+{
+  "expo": {
+    "extra": {
+      "apiUrl": "https://api.example.com",
+      "devToken": ""
+    }
+  }
+}
+```
+
+or, without editing the manifest:
+
+```bash
+cd mobile
+EXPO_PUBLIC_API_URL=http://192.168.1.50:5000 npx expo start
+```
+
+Notes that matter in practice:
+
+- A **native** build with neither value set refuses to play and says the API
+  address is missing. It does not fall back to `localhost`, because on a phone
+  that resolves to the phone itself.
+- `EXPO_PUBLIC_*` values are baked into the bundle at transform time, and
+  `expo export` reuses its cache. After changing one, clear it:
+  `rm -rf .expo dist && npx expo export -p web --clear`.
+- The address must be an absolute `http(s)` URL with no credentials, query string
+  or fragment; anything else is reported in the UI as a configuration error.
+
+### Identity on mobile (development only)
+
+Scoring is server-authoritative: a round is only credited when the **server**
+resolves the caller's identity. Two development paths exist, and both are
+server-decided:
+
+- `ALLOW_DEV_AUTH=true` on the backend (and `NODE_ENV` not `production`) — the
+  server injects a local development identity into every request. This is how the
+  scored path is exercised locally; the app needs no token.
+- `expo.extra.devToken` / `EXPO_PUBLIC_DEV_TOKEN` — sent as
+  `Authorization: Bearer <token>`. The server still verifies it, so an
+  unverifiable token is treated as a guest rather than trusted.
+
+There is deliberately **no** invented native Firebase sign-in flow. Until one is
+built, a native build without either mechanism plays as a guest and says so.
+
 ## Test the Game
 
 1. Open http://localhost:5173

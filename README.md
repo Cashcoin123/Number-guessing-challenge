@@ -32,8 +32,16 @@ A global multiplayer number guessing game with live chat, scoring, daily bonuses
   Chrome use the native share sheet, which needs no permission
 
 ✅ **Cross-Platform**
-- Web app (React + Vite)
-- Mobile apps (React Native + Expo)
+- Web app (React + Vite) — full client: sign-in, chat, leaderboard, daily bonus, sharing
+- Mobile app (React Native + Expo) — plays the **same global game** against the same API:
+  rounds are created and resolved on the server, points are credited by the server, and
+  the app renders the server's authoritative totals. Same leaderboard, same chat.
+  - A signed-in player's rounds are scored and appear on the global leaderboard.
+  - A guest can still play; the app states plainly that guest rounds are **unscored**.
+  - If the backend cannot be reached the app says so and refuses to start a round rather
+    than inventing a local game.
+  - Needs `expo.extra.apiUrl` (or `EXPO_PUBLIC_API_URL`) pointing at your backend — see
+    [Setup Guide](docs/SETUP.md#mobile-api-address).
 - Responsive design for all devices
 
 ✅ **Production Ready**
@@ -63,7 +71,16 @@ npm run dev
 ```bash
 cd mobile
 npm install
+# point the app at your backend (see docs/SETUP.md#mobile-api-address)
 npx expo start
+```
+
+The mobile app is a client of the same API as the web app: it needs a reachable
+backend. With no API address configured on a native build it says so instead of
+pretending to play. For a browser preview of the mobile app:
+
+```bash
+npx expo export -p web      # writes mobile/dist/
 ```
 
 Open http://localhost:5173 in your browser.
@@ -132,6 +149,9 @@ Open http://localhost:5173 in your browser.
 - [ ] Deploy backend to production
 - [ ] Deploy web to production
 - [ ] Build and submit mobile apps
+- [ ] Native Firebase sign-in for the mobile app (the mobile client currently scores
+      through the backend's `ALLOW_DEV_AUTH` development identity or an explicitly
+      configured development token — see [Setup Guide](docs/SETUP.md#mobile-api-address))
 - [ ] Add push notifications
 - [ ] Set up analytics and monitoring
 
