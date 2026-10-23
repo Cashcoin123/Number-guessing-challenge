@@ -175,9 +175,9 @@ Errors: `400` when `roundId` is missing or `guess` is not an integer in
 `1..100`; `403` when the round belongs to another player; `404` when the round id
 is unknown or has expired.
 
-#### Sharing a result (web client, no API involved)
+#### Sharing a result (web and mobile clients, no API involved)
 
-The web app can share a finished round. There is no sharing endpoint - it is a
+Both clients can share a finished round. There is no sharing endpoint - it is a
 client-side affordance over the `POST /game/guess` response, and it adds no
 network call of its own.
 
@@ -207,6 +207,40 @@ back to `document.execCommand`. The link is `window.location.origin`; no domain 
 invented and no third-party sharing service is contacted. The text is bounded to
 280 characters and never includes an email address or any identity field other
 than the player's own chosen username.
+
+#### Sharing a result from the mobile client
+
+`mobile/src/share.js` implements the same contract, with the transport layer
+chosen for the platform rather than the browser:
+
+| Platform | Strategy order | Link |
+| --- | --- | --- |
+| iOS / Android | React Native `Share.share` → clipboard | none (a phone app has no page address) |
+| Mobile web export | `navigator.share` → `navigator.clipboard.writeText` | the app's own origin |
+
+The text is composed from the same response fields and obeys the same three
+identity rules. Two differences, both forced by the platform:
+
+- **A native build shares no link.** There is no `window.location.origin` on a
+  device, so the link clause is omitted rather than a domain being invented for a
+  deployment that may not exist.
+- **An unscored win is worded by who the player is.** A genuine guest reads "as a
+  guest, so no points were recorded". An authenticated player whose round the
+  server failed to score reads "but the server did not record any points for the
+  round" - telling a signed-in player they were a guest would be its own lie.
+
+Four transport outcomes are kept distinct, because collapsing any two of them
+would be a lie the player could act on: `shared`, `copied`, `cancelled` (a sheet
+dismissal - neither success nor failure), `unavailable` (no transport, or a
+platform that refuses to provide one), and `failed` (a transport existed, was
+attempted, and did not complete). React Native Web's `Share.share` rejects with
+`"Share is not supported in this browser"` when the browser has no Web Share API;
+that rejection is mapped to `unavailable`, not to `cancelled` or `failed`, because
+the player did not cancel anything and nothing was attempted.
+
+The `mobile/src/share.js` module is pure - no React, React Native or Expo import
+at module top level, transports injected - so its 33 tests run under the ordinary
+`npm test` in `mobile/` without a device.
 
 ### Claim Daily Bonus
 ```

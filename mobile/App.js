@@ -28,6 +28,7 @@ import {
   Platform,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -47,6 +48,15 @@ import {
   formatSession,
   playerTotalsFromOutcome,
 } from './src/gameClient';
+import {
+  SHARE_STRATEGIES,
+  buildShareText,
+  chooseShareStrategy,
+  createShareTransports,
+  detectShareCapabilities,
+  resolveShareOrigin,
+  shareResult,
+} from './src/share';
 
 const PHASES = {
   LOADING: 'loading',
@@ -98,6 +108,25 @@ export default function App() {
   const [leaderboard, setLeaderboard] = useState([]);
   const [chat, setChat] = useState([]);
   const [bonusNote, setBonusNote] = useState(null);
+
+  // The completed round that is currently shareable.
+  //
+  // This holds the guess response EXACTLY as the server sent it (normalised by
+  // gameClient), because the share text may only quote server figures. Only a
+  // FINISHED round is ever stored here - a too-low/too-high hint is mid-round and
+  // has nothing to share - and it is cleared when a new round starts, so a stale
+  // result can never be shared as if it were the current one.
+  //
+  // It deliberately carries no share text of its own: the text is composed from
+  // this object each render by the pure module in src/share.js.
+  const [completedRound, setCompletedRound] = useState(null);
+  const [shareNotice, setShareNotice] = useState(null);
+  const [sharing, setSharing] = useState(false);
+  // The name that may be published in a share. Free text the player types here
+  // and nothing else: it is never sent to the server, never persisted, and never
+  // derived from an identity field (src/share.js rejects an email-shaped value
+  // outright, so an address cannot end up in a public post).
+  const [shareName, setShareName] = useState('');
 
   // Totals are only ever taken from a server response. `null` means "the server
   // has not told us", which is rendered as no total rather than as zero.
@@ -190,6 +219,10 @@ export default function App() {
       setRound(result.round);
       setAttemptsUsed(0);
       setGuess('');
+      // A new round makes any previously completed result stale. Clearing it here
+      // is what stops a player sharing last round's score as this round's.
+      setCompletedRound(null);
+      setShareNotice(null);
       setFeedback({
         tone: TONES.INFO,
         headline: `Round started - you have ${result.round.maxAttempts} attempts.`,
@@ -234,6 +267,17 @@ export default function App() {
       setAttemptsUsed(outcome.attempts);
       setGuess('');
       setFeedback(describeResult(outcome, session));
+
+      if (outcome.finished) {
+        // Only a finished round becomes shareable, and what is stored is the
+        // server's own response - the share text is composed from it, never from
+        // React state that could drift.
+        setCompletedRound(outcome);
+        setShareNotice(null);
+      } else {
+        // A too-low/too-high hint replaces nothing: mid-round is not a result.
+        setCompletedRound(null);
+      }
 
       const serverTotals = playerTotalsFromOutcome(outcome);
       if (serverTotals) {
@@ -286,6 +330,66 @@ export default function App() {
   }, [client, refreshShared]);
 
   const isGuest = session.mode === IDENTITY_MODES.GUEST;
+
+  // --- social sharing -------------------------------------------------------
+  //
+  // What really exists on this platform, observed rather than assumed. On web
+  // this reads `navigator.share` / `navigator.clipboard.writeText`; on native it
+  // uses React Native's own Share module. The result is an object of functions,
+  // so "no transport at all" is representable and reaches the UI as an honest
+  // capability gap.
+  //
+  // Not memoised on purpose: it is a handful of typeof checks, and re-reading
+  // them each render means a capability that appears after first paint (or a
+  // share sheet that appears once the page is focused) is reflected.
+  const shareTransports = createShareTransports({
+    platform: config.platform,
+    scope: typeof globalThis === 'object' && globalThis ? globalThis : undefined,
+    nativeShare: Share && typeof Share.share === 'function' ? (content) => Share.share(content) : undefined,
+  });
+  const shareCapability = chooseShareStrategy(detectShareCapabilities(shareTransports));
+
+  // Whether the composed text will actually carry a link. A native build has no
+  // page address, so it shares the text alone; the caption must say so rather
+  // than promising a link that is not there.
+  const shareOrigin = resolveShareOrigin({
+    platform: config.platform,
+    scope: typeof globalThis === 'object' && globalThis ? globalThis : undefined,
+  });
+
+  // Composed from the server's response only. Null for a round that is not
+  // finished, which is what makes the panel disappear mid-round instead of
+  // offering a nonsense share.
+  const shareText = useMemo(
+    () =>
+      completedRound
+        ? buildShareText({
+            outcome: completedRound,
+            displayName: shareName,
+            origin: shareOrigin,
+            identity: session.mode,
+          })
+        : null,
+    [completedRound, shareName, shareOrigin, session.mode]
+  );
+
+  const handleShare = useCallback(async () => {
+    if (!shareText) {
+      setShareNotice('Finish a round before sharing a result.');
+      return;
+    }
+
+    setSharing(true);
+    try {
+      // `shareResult` reports what actually happened: a dismissal is a CANCELLED
+      // (neither success nor failure), an absent transport is UNAVAILABLE, and a
+      // copy is claimed only when the write really resolved.
+      const outcome = await shareResult({ text: shareText, transports: shareTransports });
+      if (mounted.current) setShareNotice(outcome.message);
+    } finally {
+      if (mounted.current) setSharing(false);
+    }
+  }, [shareText, shareTransports]);
 
   // --- render helpers -------------------------------------------------------
 
@@ -385,6 +489,65 @@ export default function App() {
           )
         ) : null}
 
+        {/* Social sharing - a finished round only.
+            The panel exists exactly when the last guess was terminal (win or
+            loss). It is absent mid-round, so a too-low/too-high hint never
+            offers to "share" a result that does not exist yet. */}
+        {phase === PHASES.READY && completedRound && shareText ? (
+          <View style={styles.card} testID="share-panel">
+            <Text style={styles.cardLabel}>Share your result</Text>
+
+            <TextInput
+              value={shareName}
+              onChangeText={setShareName}
+              placeholder="Your name for the post (optional)"
+              placeholderTextColor="#64748b"
+              maxLength={32}
+              editable={!sharing}
+              testID="share-name"
+              style={styles.input}
+            />
+
+            {/* Rendered as a plain text child, never as markup, so a name with
+                angle brackets stays inert text. */}
+            <Text style={styles.shareText} testID="share-text">
+              {shareText}
+            </Text>
+
+            <Text style={styles.shareCapability} testID="share-capability">
+              {shareCapability === SHARE_STRATEGIES.UNAVAILABLE
+                ? 'This device provides neither a share sheet nor clipboard access, so copy the text above manually.'
+                : shareCapability === SHARE_STRATEGIES.CLIPBOARD
+                  ? `Copies the text to your clipboard.${shareOrigin ? ' The link is this app\u2019s address.' : ''}`
+                  : `Uses your device share sheet.${shareOrigin ? ' The link is this app\u2019s address.' : ''}`}
+            </Text>
+
+            <TouchableOpacity
+              accessibilityRole="button"
+              testID="share-result"
+              style={[styles.buttonShare, sharing && styles.buttonDisabled]}
+              onPress={handleShare}
+              disabled={sharing}
+            >
+              <Text style={styles.buttonText}>
+                {sharing
+                  ? 'Sharing...'
+                  : shareCapability === SHARE_STRATEGIES.UNAVAILABLE
+                    ? 'Sharing unavailable'
+                    : shareCapability === SHARE_STRATEGIES.CLIPBOARD
+                      ? 'Copy result'
+                      : 'Share result'}
+              </Text>
+            </TouchableOpacity>
+
+            {shareNotice ? (
+              <Text style={styles.shareNotice} testID="share-notice">
+                {shareNotice}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+
         {phase === PHASES.READY && !isGuest ? (
           <TouchableOpacity
             accessibilityRole="button"
@@ -482,6 +645,19 @@ const styles = StyleSheet.create({
   button: { backgroundColor: '#3b82f6', paddingVertical: 14, borderRadius: 10 },
   buttonDisabled: { backgroundColor: '#1d4ed8', opacity: 0.6 },
   buttonText: { color: '#fff', textAlign: 'center', fontWeight: 'bold', fontSize: 16 },
+  // Sharing: purple to match the web app's share affordance, so the same action
+  // looks like the same action on both platforms.
+  buttonShare: { backgroundColor: '#a855f7', paddingVertical: 14, borderRadius: 10 },
+  shareText: {
+    color: '#e2e8f0',
+    fontSize: 14,
+    lineHeight: 20,
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    padding: 12,
+  },
+  shareCapability: { color: '#94a3b8', fontSize: 12 },
+  shareNotice: { color: '#cbd5e1', fontSize: 12 },
   buttonSecondary: {
     borderColor: '#3b82f6',
     borderWidth: 1,

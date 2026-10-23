@@ -97,6 +97,41 @@ server-decided:
 There is deliberately **no** invented native Firebase sign-in flow. Until one is
 built, a native build without either mechanism plays as a guest and says so.
 
+## Sharing a result from the mobile app
+
+A finished round — a win or a loss — shows a *Share your result* panel with the
+composed text, an optional name field for the post, and one button. Nothing needs
+to be installed or configured for this; it is a client-side affordance over the
+guess response and makes no extra request.
+
+What happens depends on the platform, and the app **reports what it observed**
+rather than assuming:
+
+| Platform | Button | Transport |
+| --- | --- | --- |
+| iOS / Android | *Share result* | the OS share sheet (React Native `Share`) |
+| Mobile web, browser has Web Share | *Share result* | `navigator.share` |
+| Mobile web, clipboard only | *Copy result* | `navigator.clipboard.writeText` |
+| Neither | *Sharing unavailable* | none — the UI says so and invites manual copy |
+
+Notes that matter when testing by hand:
+
+- **The clipboard path needs the page focused and a secure context.** `localhost`
+  and `127.0.0.1` count as secure; a plain-HTTP LAN address does not, so a phone
+  opening `http://192.168.x.x` will see the clipboard path fail. That is a browser
+  rule, not a bug in the app.
+- **Desktop Chrome may have no `navigator.share`.** Observe it rather than assume:
+  `typeof navigator.share` in the console. Without it the app offers the clipboard
+  and says which it is doing.
+- **A native build shares no link.** A phone app has no `window.location.origin`,
+  so the text carries no URL instead of a made-up domain. Only the web export
+  includes the app's own address.
+- **Dismissing the share sheet is a cancel.** The app says "Share cancelled -
+  nothing was sent", which is neither a success nor a failure, because a player
+  who backed out has not posted anything.
+- The mobile share text is covered by `mobile/test/share.test.js` (33 tests, part
+  of `npm test`). No device is needed to run them.
+
 ## Test the Game
 
 1. Open http://localhost:5173

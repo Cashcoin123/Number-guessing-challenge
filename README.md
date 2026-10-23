@@ -17,19 +17,21 @@ A global multiplayer number guessing game with live chat, scoring, daily bonuses
 - Player profiles
 - Message history
 
-✅ **Social sharing (web)**
-- Share a finished round - a win or a loss - from the web app
-- Uses the device share sheet (Web Share API) where the browser provides it,
-  otherwise copies the text to the clipboard
+✅ **Social sharing (web and mobile)**
+- Share a finished round — a win or a loss — from the web app **and** the mobile app
+- Uses the device share sheet (Web Share API on web, the OS share sheet on iOS and
+  Android) where the platform provides it, otherwise copies the text to the clipboard
 - The shared text quotes the server's own numbers only: attempts, points awarded,
   total, best and streak. A guest round says plainly that no points were
   recorded, and a lost round never claims points
-- The link is the app's own page address. No shortened link, third-party sharing
-  endpoint or tracker is involved
-- A browser that offers neither a share sheet nor clipboard access says so in the
+- The link is the app's own address on web. A native build has no page address, so
+  it shares the text without a link rather than inventing a domain
+- A device that offers neither a share sheet nor clipboard access says so in the
   UI instead of appearing to do nothing
-- Requires the page to be focused for the clipboard path; mobile Safari and
-  Chrome use the native share sheet, which needs no permission
+- Requires the page to be focused for the clipboard path on web; the native share
+  sheet needs no permission
+- Composed by a pure module with its own test suite on both platforms
+  (`frontend/src/share.js` + 21 tests, `mobile/src/share.js` + 33 tests)
 
 ✅ **Cross-Platform**
 - Web app (React + Vite) — full client: sign-in, chat, leaderboard, daily bonus, sharing
@@ -40,6 +42,10 @@ A global multiplayer number guessing game with live chat, scoring, daily bonuses
   - A guest can still play; the app states plainly that guest rounds are **unscored**.
   - If the backend cannot be reached the app says so and refuses to start a round rather
     than inventing a local game.
+  - A finished round can be shared from the phone: the OS share sheet on iOS and
+    Android, the clipboard where that is all the platform offers, and an explicit
+    message when it offers neither. Shares the text only on a native build, since a
+    phone app has no page address to link to.
   - Needs `expo.extra.apiUrl` (or `EXPO_PUBLIC_API_URL`) pointing at your backend — see
     [Setup Guide](docs/SETUP.md#mobile-api-address).
 - Responsive design for all devices
