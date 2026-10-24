@@ -1,124 +1,37 @@
-# Number Guessing Challenge
+# Dependencies
+node_modules/
 
-A global multiplayer number guessing game with live chat, leaderboard tracking, daily bonuses, and social sharing across web, iPhone, and Android.
+# Local environment files (keep the templates!)
+.env
+.env.local
+.env.*
+!.env.example
 
-## Overview
+# Build output
+dist/
+build/
+web-build/
 
-This repository contains the production foundation for a cross-platform app that lets players:
+# Expo / React Native
+.expo/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
 
-- Guess a random number between 1 and 100
-- Earn score and build streaks
-- Claim a free daily bonus every 24 hours
-- Play multiple rounds in a replay loop
-- Join a multiplayer live chat room
-- Share their score to social media
-- Compete on a global leaderboard
+# Test coverage
+coverage/
 
-## Architecture
+# Logs
+*.log
+npm-debug.log*
 
-- Backend: Node.js + Express + Socket.IO
-- Web Frontend: React + Vite
-- Mobile Frontend: React Native + Expo
-- Data: JSON file foundation for local development; ready to be replaced by Firebase/Postgres in production
+# Runtime data (local JSON persistence)
+backend/data/*.json
 
-## Repository Structure
-
-```text
-number-guessing-challenge/
-├── README.md
-├── .gitignore
-├── backend/
-│   ├── .env.example
-│   ├── package.json
-│   └── src/
-│       ├── server.js
-│       ├── config/
-│       │   └── db.js
-│       ├── routes/
-│       │   ├── gameRoutes.js
-│       │   ├── chatRoutes.js
-│       │   └── userRoutes.js
-│       └── utils/
-│           └── helpers.js
-├── frontend/
-│   ├── index.html
-│   ├── package.json
-│   └── src/
-│       ├── App.jsx
-│       └── main.jsx
-├── mobile/
-│   ├── App.js
-│   ├── app.json
-│   └── package.json
-├── docs/
-│   └── SETUP.md
-└── LICENSE
-```
-
-## Local Run
-
-### 1) Backend
-
-```bash
-cd backend
-npm install
-cp .env.example .env
-npm run dev
-```
-
-### 2) Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### 3) Mobile
-
-```bash
-cd mobile
-npm install
-npx expo start
-```
-
-## Environment Files
-
-Backend `.env` example:
-
-```env
-PORT=5000
-JWT_SECRET=change-me
-CLIENT_URL=http://localhost:5173
-```
-
-## API Endpoints
-
-### Health
-- `GET /api/health`
-
-### Game
-- `POST /api/game/start`
-- `POST /api/game/guess`
-- `GET /api/game/stats`
-
-### Chat
-- `GET /api/chat/messages`
-- `POST /api/chat/send`
-
-### Players
-- `POST /api/users/register`
-- `GET /api/users/:id`
-
-## Production Roadmap
-
-- Replace JSON storage with Firebase or PostgreSQL
-- Add WebSocket rooms for global realtime chat
-- Add user auth and profiles
-- Deploy backend to Render/Railway/Firebase
-- Deploy web frontend to Vercel/Netlify
-- Build mobile apps with Expo EAS
-
-## License
-
-MIT
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

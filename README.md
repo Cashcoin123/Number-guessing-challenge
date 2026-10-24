@@ -1,99 +1,188 @@
+# Number Guessing Challenge
 
-# Production Upgrade Plan
+A global multiplayer number guessing game with live chat, scoring, daily bonuses, and social sharing. Available on web, iPhone, and Android.
 
-This document describes the next production phase for the game.
+## 🎮 Features
 
-## 1. Data Layer
+✅ **Gameplay**
+- Guess a random number between 1 and 100
+- 10 attempts per round
+- Score based on attempts
+- Streak tracking and best score
+- Daily +50 point bonus every 24 hours
 
-The app currently uses local JSON files for development. The next step is to move to a persistent database layer.
+✅ **Multiplayer**
+- Global chat room
+- Real-time leaderboard
+- Player profiles
+- Message history
 
-### Recommended choices
-- Firebase Firestore for easy setup and realtime syncing
-- PostgreSQL for structured, relational data and easier analytics
+✅ **Social sharing (web and mobile)**
+- Share a finished round — a win or a loss — from the web app **and** the mobile app
+- Uses the device share sheet (Web Share API on web, the OS share sheet on iOS and
+  Android) where the platform provides it, otherwise copies the text to the clipboard
+- The shared text quotes the server's own numbers only: attempts, points awarded,
+  total, best and streak. A guest round says plainly that no points were
+  recorded, and a lost round never claims points
+- The link is the app's own address on web. A native build has no page address, so
+  it shares the text without a link rather than inventing a domain
+- A device that offers neither a share sheet nor clipboard access says so in the
+  UI instead of appearing to do nothing
+- Requires the page to be focused for the clipboard path on web; the native share
+  sheet needs no permission
+- Composed by a pure module with its own test suite on both platforms
+  (`frontend/src/share.js` + 21 tests, `mobile/src/share.js` + 33 tests)
 
-### Recommended data model
-- `users`
-  - id
-  - username
-  - email
-  - best_score
-  - streak
-  - joined_at
-  - last_bonus_at
-- `scores`
-  - id
-  - user_id
-  - points
-  - created_at
-- `chat_messages`
-  - id
-  - username
-  - message
-  - score
-  - created_at
-- `leaderboard`
-  - ranking snapshot
-  - updated_at
+✅ **Cross-Platform**
+- Web app (React + Vite) — full client: sign-in, chat, leaderboard, daily bonus, sharing
+- Mobile app (React Native + Expo) — plays the **same global game** against the same API:
+  rounds are created and resolved on the server, points are credited by the server, and
+  the app renders the server's authoritative totals. Same leaderboard, same chat.
+  - A signed-in player's rounds are scored and appear on the global leaderboard.
+  - A guest can still play; the app states plainly that guest rounds are **unscored**.
+  - If the backend cannot be reached the app says so and refuses to start a round rather
+    than inventing a local game.
+  - **Chat is two-way.** A signed-in player writes to the same global room from the
+    phone, through the same hardened `POST /api/chat/send`, so the sender's handle and
+    score are derived by the server and never sent by the client. A guest can read the
+    room and is told plainly that posting needs an identity - their text stays in the
+    box, and no refusal is ever reported as sent. A message longer than the server's
+    280-character bound is refused rather than silently shortened.
+  - **Shared state stays current on a stated interval.** This client has no socket, so
+    the leaderboard and chat are re-read every 10 seconds while the screen is visible,
+    with backoff on failure and no overlapping reads. The app shows when it last read
+    instead of describing itself as realtime.
+  - A finished round can be shared from the phone: the OS share sheet on iOS and
+    Android, the clipboard where that is all the platform offers, and an explicit
+    message when it offers neither. Shares the text only on a native build, since a
+    phone app has no page address to link to.
+  - Needs `expo.extra.apiUrl` (or `EXPO_PUBLIC_API_URL`) pointing at your backend — see
+    [Setup Guide](docs/SETUP.md#mobile-api-address).
+- Responsive design for all devices
 
-## 2. Authentication
+✅ **Production Ready**
+- Local development setup
+- Deployment to Vercel, Render, and App Stores
+- Socket.IO for real-time features
+- Persistent data storage
 
-Use Firebase Auth or JWT.
-
-### Recommended approach
-- Firebase Auth for web and mobile apps
-- JWT for backend API flows
-- Session data stored securely on server side
-
-## 3. Realtime multiplayer
-
-Use Socket.IO rooms to support:
-- global chat room
-- challenge rooms
-- by-country or by-language chat groups
-- room-based live matches
-
-## 4. Deployment pipeline
+## 🚀 Quick Start
 
 ### Backend
-- Render or Railway for Node.js app hosting
-- Set NODE_ENV=production
-- Set `DATABASE_URL` or Firebase project credentials
+```bash
+cd backend
+npm install
+cp .env.example .env
+npm run dev
+```
 
-### Frontend (web)
-- Vercel
-- Deploy `frontend` as production build
-- Use env vars for backend API URL
+### Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
 ### Mobile
-- Expo EAS
-- Build iOS and Android with store submission pipeline
+```bash
+cd mobile
+npm install
+# point the app at your backend (see docs/SETUP.md#mobile-api-address)
+npx expo start
+```
 
-## 5. Monitoring
+The mobile app is a client of the same API as the web app: it needs a reachable
+backend. With no API address configured on a native build it says so instead of
+pretending to play. For a browser preview of the mobile app:
 
-Add:
-- Sentry
-- PostHog or Mixpanel analytics
-- uptime monitor
-- error logging
+```bash
+npx expo export -p web      # writes mobile/dist/
+```
 
-## 6. Launch checklist
+Open http://localhost:5173 in your browser.
 
-- [ ] Database migrated from JSON storage
-- [ ] Auth active for players
-- [ ] Global leaderboard live
-- [ ] Real-time chat working
-- [ ] Deployment environment live
-- [ ] Mobile builds passing
-- [ ] Error monitoring active
-- [ ] Store metadata ready
+## 📚 Documentation
 
-## 7. Recommended first production release
+- [Setup Guide](docs/SETUP.md) — Local development
+- [Deployment Guide](docs/DEPLOYMENT.md) — Production setup
+- [API Documentation](docs/API.md) — API endpoints
 
-For the first live product, keep it simple:
-- Firebase Firestore
-- Firebase Auth
-- Socket.IO chat rooms
-- Vercel + Render
-- Expo EAS for mobile builds
+## 🏗️ Architecture
 
-This gives the fastest launch while keeping the app production-safe.
+```
+┌─────────────────────────────────────┐
+│   Frontend (React + Vite)           │
+│   Mobile (React Native + Expo)      │
+└──────────────┬──────────────────────┘
+               │ HTTP/WebSocket
+               ↓
+┌─────────────────────────────────────┐
+│   Backend (Node.js + Express)       │
+│   Real-time (Socket.IO)             │
+└──────────────┬──────────────────────┘
+               │ File System / Firebase / Postgres
+               ↓
+┌─────────────────────────────────────┐
+│   Data Store                        │
+│   • game_data.json                  │
+│   • chat_messages.json              │
+│   • users.json                      │
+│   • leaderboard.json                │
+└─────────────────────────────────────┘
+```
+
+## 📊 API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Health check |
+| GET | `/api/game/stats` | Game statistics |
+| POST | `/api/game/guess` | Submit guess |
+| POST | `/api/game/bonus` | Claim daily bonus |
+| GET | `/api/chat/messages` | Chat history |
+| POST | `/api/chat/send` | Send message |
+| GET | `/api/leaderboard` | Global rankings |
+
+## 🌍 Deployment
+
+### Backend
+- **Render:** `git push origin main` (auto-deploy)
+- **Railway:** Connect GitHub repo
+- **Heroku:** `git push heroku main`
+
+### Frontend
+- **Vercel:** `vercel --prod`
+- **Netlify:** `netlify deploy --prod`
+
+### Mobile
+- **iOS:** `eas build --platform ios` → `eas submit --platform ios`
+- **Android:** `eas build --platform android` → `eas submit --platform android`
+
+## 🔄 Next Steps
+
+- [ ] Add Firebase/Postgres database
+- [ ] Implement user authentication
+- [ ] Deploy backend to production
+- [ ] Deploy web to production
+- [ ] Build and submit mobile apps
+- [ ] Native Firebase sign-in for the mobile app (the mobile client currently scores
+      through the backend's `ALLOW_DEV_AUTH` development identity or an explicitly
+      configured development token — see [Setup Guide](docs/SETUP.md#mobile-api-address))
+- [ ] Add push notifications
+- [ ] Set up analytics and monitoring
+
+## 📝 License
+
+MIT — See [LICENSE](LICENSE) for details.
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit changes
+4. Push to branch
+5. Open a pull request
+
+---
+
+Built with ❤️ by **Cashcoin123**
