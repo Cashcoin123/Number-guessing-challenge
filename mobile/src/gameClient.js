@@ -49,6 +49,7 @@ const ENDPOINTS = Object.freeze({
   guess: '/api/game/guess',
   leaderboard: '/api/leaderboard',
   chat: '/api/chat/messages',
+  chatSend: '/api/chat/send',
   bonus: '/api/game/bonus',
 });
 
@@ -621,6 +622,20 @@ function createGameClient({ baseUrl, token, fetchImpl, timeoutMs = DEFAULT_TIMEO
     return { ok: true, messages: normaliseChatMessages(response.payload) };
   }
 
+  /**
+   * POST one chat message.
+   *
+   * The body is passed straight through to `request`, which JSON-encodes whatever
+   * it is given. src/chat.js is the only thing that constructs that body, and it
+   * constructs exactly `{ message }` - so this function is deliberately not a
+   * place where a caller can add a username or a score. A 401 here is NOT turned
+   * into a guest success the way `getSession` does: a failed write is a failure,
+   * and src/chat.js decides what the player is told about it.
+   */
+  async function sendChatMessage(body) {
+    return request(ENDPOINTS.chatSend, { method: 'POST', body });
+  }
+
   async function claimBonus() {
     const response = await request(ENDPOINTS.bonus, { method: 'POST', body: {} });
     if (!response.ok) return response;
@@ -660,6 +675,7 @@ function createGameClient({ baseUrl, token, fetchImpl, timeoutMs = DEFAULT_TIMEO
     getSession,
     getLeaderboard,
     getChatMessages,
+    sendChatMessage,
     claimBonus,
   };
 }

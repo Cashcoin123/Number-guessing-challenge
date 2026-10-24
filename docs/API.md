@@ -242,6 +242,68 @@ The `mobile/src/share.js` module is pure - no React, React Native or Expo import
 at module top level, transports injected - so its 33 tests run under the ordinary
 `npm test` in `mobile/` without a device.
 
+#### Chat from the mobile client (posting and freshness)
+
+The mobile client both reads and writes the global room. Reading needs no
+identity; **writing does**.
+
+```
+GET  /chat/messages                          (public)
+POST /chat/send   { "message": "..." }       (authenticated)
+```
+
+The request body is built in exactly one place (`mobile/src/chat.js`,
+`buildSendBody`) and has exactly one key. The display name is
+`resolveDisplayName(req.user)` and the score is read from the stored user record,
+so `username`/`score`/`userId`/`timestamp` in a request body are ignored by the
+server. The client therefore never sends them: doing so is the impersonation
+defect ISSUE-4 fixed, and the runtime evidence asserts their **absence** on the
+wire rather than merely the presence of `message`.
+
+Client-side rules, covered by `mobile/test/chat.test.js` (38 tests):
+
+- **A 401 is refused, not reported.** A guest cannot post. They are told, in the
+  same words the web app uses, *"Sign in to join the global chat."* - and no
+  outcome notice for any failure contains the words *sent*, *posted*,
+  *delivered*, *published* or *submitted* (asserted over every failure status).
+- **The draft is kept on failure.** The composer is cleared **only** when the
+  server confirms it stored that exact text, so a refusal never makes the text
+  disappear as though it had been delivered.
+- **The text is never cut.** The server stores at most 280 characters and
+  truncates silently on the way in, so an over-long message is **refused before
+  it is sent**, with its real length quoted. Trimming it and reporting it as sent
+  would display text the player did not write, attributed to them. Length is
+  counted in UTF-16 code units - the unit `slice(0, 280)` cuts on - so a message
+  built from emoji cannot slip past a code-point check and be cut in half.
+- **A 200 is not enough.** The stored `message` and `username` are read back out
+  of the response, and text differing from what was submitted is reported as
+  altered rather than accepted.
+- **Five failure kinds stay distinct:** no identity (401/403), rate-limited (429),
+  refused (400), server fault (5xx), unreachable. Each has its own wording because
+  each has its own fix.
+
+Freshness. This client has **no socket** - it talks REST only - so "current" means
+"re-read on an interval", and the documentation must not upgrade that into
+"realtime". Both the leaderboard and the chat are re-read every **10 seconds**
+while the screen is visible:
+
+- one read cycle at a time, re-armed after the previous one finishes, so a slow
+  server cannot cause a pile-up;
+- a tick that arrives while a cycle is running is skipped and counted, not queued;
+- every entry point (the interval, the read after a send, the read after a scored
+  round or a granted bonus, the read on resume) joins **one serialised queue**, so
+  two reads are never in flight and a slower older answer cannot land on top of a
+  newer one;
+- on failure the interval doubles up to 120 s and snaps back on the first success;
+- a source that failed returns `null`, which means "keep what is on screen" - a
+  failed refresh never blanks the room or the leaderboard;
+- the loop is stopped on unmount and while the app is backgrounded, and resuming
+  re-reads at once. A read still in flight when the screen goes away is discarded.
+
+The screen states its own freshness in seconds (*"Shared state updated 3 s ago.
+This screen re-reads the leaderboard and chat every 10 s while it is open."*)
+rather than implying a live connection.
+
 ### Claim Daily Bonus
 ```
 POST /game/bonus      (authenticated)
@@ -389,7 +451,8 @@ the web app; there is no mobile-only endpoint.
 | Guess | `POST /game/guess` `{ roundId, guess }` | `result`, `attempts`, `maxAttempts`, `remaining`, and on a finished round `secretNumber`, `scored`, `awarded`, `score`, `bestScore`, `streak` |
 | Global stats | `GET /game/stats` | `bestScore`, `streak`, `totalGames` |
 | Leaderboard | `GET /leaderboard` | `rank`, `username`, `bestScore`, `streak` |
-| Chat | `GET /chat/messages` | `username`, `message` |
+| Chat (read) | `GET /chat/messages` | `username`, `message`, `score` |
+| Chat (post) | `POST /chat/send` `{ message }` | the stored `username`, `message`, `score` |
 | Daily bonus | `POST /game/bonus` | `granted`, `bonus`, `score`, `bestScore`, `streak` |
 
 Rules the mobile client follows, and that are covered by
@@ -413,6 +476,13 @@ Rules the mobile client follows, and that are covered by
   "the server cannot be reached" state and no way to start a round; an
   unreadable body is reported as unreadable; an HTTP error surfaces the server's
   own message.
+- **Chat is readable and writable.** A signed-in player can post to the global
+  room; a guest can read it and is told plainly that posting needs an identity,
+  with the draft kept so nothing silently vanishes. Both the chat and the
+  leaderboard are re-read every 10 s while the screen is visible (there is no
+  socket on this client), with backoff on failure, no overlapping reads, and no
+  read after unmount. See
+  [Chat from the mobile client](#chat-from-the-mobile-client-posting-and-freshness).
 
 ### API base URL
 

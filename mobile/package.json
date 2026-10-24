@@ -9,7 +9,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "export:web": "expo export -p web",
-    "test": "node --test test/gameClient.test.js test/config.test.js test/share.test.js"
+    "test": "node --test test/gameClient.test.js test/config.test.js test/share.test.js test/chat.test.js"
   },
   "dependencies": {
     "@expo/metro-runtime": "~3.2.3",

@@ -42,6 +42,16 @@ A global multiplayer number guessing game with live chat, scoring, daily bonuses
   - A guest can still play; the app states plainly that guest rounds are **unscored**.
   - If the backend cannot be reached the app says so and refuses to start a round rather
     than inventing a local game.
+  - **Chat is two-way.** A signed-in player writes to the same global room from the
+    phone, through the same hardened `POST /api/chat/send`, so the sender's handle and
+    score are derived by the server and never sent by the client. A guest can read the
+    room and is told plainly that posting needs an identity - their text stays in the
+    box, and no refusal is ever reported as sent. A message longer than the server's
+    280-character bound is refused rather than silently shortened.
+  - **Shared state stays current on a stated interval.** This client has no socket, so
+    the leaderboard and chat are re-read every 10 seconds while the screen is visible,
+    with backoff on failure and no overlapping reads. The app shows when it last read
+    instead of describing itself as realtime.
   - A finished round can be shared from the phone: the OS share sheet on iOS and
     Android, the clipboard where that is all the platform offers, and an explicit
     message when it offers neither. Shares the text only on a native build, since a

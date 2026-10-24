@@ -25,6 +25,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -48,6 +49,15 @@ import {
   formatSession,
   playerTotalsFromOutcome,
 } from './src/gameClient';
+import {
+  MAX_MESSAGE_LENGTH as CHAT_MAX_MESSAGE_LENGTH,
+  REFRESH_INTERVAL_MS,
+  createChatSender,
+  createSharedRefresher,
+  composeChatLine,
+  describeRefreshFailure,
+  formatFreshness,
+} from './src/chat';
 import {
   SHARE_STRATEGIES,
   buildShareText,
@@ -109,6 +119,23 @@ export default function App() {
   const [chat, setChat] = useState([]);
   const [bonusNote, setBonusNote] = useState(null);
 
+  // --- global chat: composing -------------------------------------------------
+  //
+  // `chatDraft` is what the player is typing and is the ONLY place their text
+  // lives until the server confirms it stored that exact text. It is cleared on
+  // success and deliberately kept on every failure, so a refusal can never look
+  // like a delivery and a player never loses a message they cannot retype.
+  const [chatDraft, setChatDraft] = useState('');
+  const [chatSending, setChatSending] = useState(false);
+  const [chatNotice, setChatNotice] = useState(null);
+
+  // How current the two shared cards are. `lastSharedAt` is set only on a
+  // successful read, so the caption never claims freshness the app does not have.
+  // It doubles as the re-render trigger for that caption: it carries a fresh
+  // `Date.now()` value on every successful read, so setting it re-renders the age.
+  const [lastSharedAt, setLastSharedAt] = useState(null);
+  const [refreshNote, setRefreshNote] = useState(null);
+
   // The completed round that is currently shareable.
   //
   // This holds the guess response EXACTLY as the server sent it (normalised by
@@ -137,15 +164,114 @@ export default function App() {
     mounted.current = false;
   }, []);
 
-  const refreshShared = useCallback(async () => {
+  // --- one-off read, used before the loop exists -------------------------------
+  //
+  // Only the bootstrap path uses this. Once the refresh loop is running, every
+  // read - including the event-driven ones after a scored round or a granted
+  // bonus - goes through the loop's serialised queue via `refreshShared` below,
+  // so an event-triggered read cannot race a timer-triggered one.
+  const readOnce = useCallback(async () => {
     const [board, messages] = await Promise.all([
       client.getLeaderboard(),
       client.getChatMessages(),
     ]);
     if (!mounted.current) return;
-    if (board.ok) setLeaderboard(board.rows);
+    if (board.ok) {
+      setLeaderboard(board.rows);
+      setLastSharedAt(Date.now());
+    }
     if (messages.ok) setChat(messages.messages);
   }, [client]);
+
+  // --- freshness: the bounded refresh loop ------------------------------------
+  //
+  // Replaces the old one-shot `refreshShared` calls. There is no socket on this
+  // client, so "current" here means "re-read on an interval", and the interval is
+  // the module's documented REFRESH_INTERVAL_MS. All of the scheduling logic -
+  // no overlap, backoff on failure, nothing after stop, no older answer landing on
+  // newer state - lives in src/chat.js and is tested under `node --test`. This
+  // effect only supplies the two reads and applies what comes back.
+  //
+  // What comes back is `null` for a source that failed, and null means "keep what
+  // is on screen": a failed refresh must never blank the leaderboard or the chat.
+  const refresher = useMemo(
+    () =>
+      createSharedRefresher({
+        loadLeaderboard: () => client.getLeaderboard(),
+        loadChat: () => client.getChatMessages(),
+        onSnapshot: (snapshot) => {
+          if (!mounted.current) return;
+          if (snapshot.leaderboard !== null) setLeaderboard(snapshot.leaderboard);
+          if (snapshot.chat !== null) setChat(snapshot.chat);
+          if (snapshot.leaderboard !== null || snapshot.chat !== null) {
+            setLastSharedAt(snapshot.at);
+          }
+          // Null when this read was clean, so the note clears itself on recovery
+          // without a second effect and without a second request.
+          setRefreshNote(
+            describeRefreshFailure(snapshot, { nextDelayMs: snapshot.nextDelayMs })
+              ? { tone: TONES.ERROR, message: describeRefreshFailure(snapshot, { nextDelayMs: snapshot.nextDelayMs }) }
+              : null
+          );
+        },
+        intervalMs: REFRESH_INTERVAL_MS,
+      }),
+    [client]
+  );
+
+  // Start the loop when the app becomes ready, stop it on unmount. `stop()` clears
+  // the pending timer and discards any read still in flight, so no timer fires
+  // after the screen is gone.
+  //
+  // React Native Web's `AppState` maps to the document's visibility state, so
+  // "foregrounded" here means the screen is actually visible; a hidden tab stops
+  // reading and resuming it re-reads immediately rather than waiting out the rest
+  // of an interval. This is the only platform object involved and it is read
+  // through the injected subscription, so the pure module stays testable.
+  useEffect(() => {
+    if (phase !== PHASES.READY) return undefined;
+    refresher.start();
+    return () => refresher.stop();
+  }, [phase, refresher]);
+
+  /**
+   * Re-read now. Every caller after bootstrap goes through here, and the refresher
+   * serialises it behind any read already running - so a post, a scored round and
+   * a timer tick can never put two reads in flight and let an older answer land on
+   * newer state.
+   */
+  const refreshShared = useCallback(
+    async (reason = 'event') => {
+      await refresher.refreshNow(reason);
+    },
+    [refresher]
+  );
+
+  // While the app is hidden the interval is stopped, and becoming visible again
+  // re-reads at once instead of waiting out the rest of an interval. react-native-
+  // web maps AppState to the document visibility state; on a native build it maps
+  // to foreground/background. Either way the effect is the same: no polling for a
+  // screen nobody is looking at, and fresh data the moment it is looked at.
+  useEffect(() => {
+    if (phase !== PHASES.READY) return undefined;
+
+    function onChange(state) {
+      if (state === 'active') {
+        refresher.start();
+        refresher.refreshNow('resumed');
+      } else {
+        refresher.stop();
+      }
+    }
+
+    const subscription = AppState.addEventListener
+      ? AppState.addEventListener('change', onChange)
+      : null;
+
+    return () => {
+      if (subscription && typeof subscription.remove === 'function') subscription.remove();
+    };
+  }, [phase, refresher]);
 
   // Initial load: who am I, and what does the shared game look like right now?
   useEffect(() => {
@@ -193,14 +319,17 @@ export default function App() {
         headline: 'Start a round to play the global game.',
         detail: 'The winning number is generated and kept on the server.',
       });
-      await refreshShared();
+      // The bootstrap read, before the refresh loop exists. The loop takes over
+      // from here (and does its own first read on start), so this is the only read
+      // that bypasses the serialised queue.
+      await readOnce();
     }
 
     bootstrap();
     return () => {
       active = false;
     };
-  }, [client, config.configError, refreshShared]);
+  }, [client, config.configError, readOnce]);
 
   const startRound = useCallback(async () => {
     setBusy(true);
@@ -330,6 +459,47 @@ export default function App() {
   }, [client, refreshShared]);
 
   const isGuest = session.mode === IDENTITY_MODES.GUEST;
+
+  // --- global chat: posting --------------------------------------------------
+  //
+  // The sender is the pure module's, bound to the client's POST. src/chat.js
+  // builds the body (exactly `{ message }`), decides whether the text may be
+  // posted at all, and classifies whatever comes back. Nothing here decides what
+  // "sent" means - that is the module's job and it is the module that is tested.
+  const chatSender = useMemo(
+    () => createChatSender({ post: (body) => client.sendChatMessage(body) }),
+    [client]
+  );
+
+  const handleSendChat = useCallback(async () => {
+    if (chatSending) return;
+
+    const draft = chatDraft;
+    setChatSending(true);
+    // The previous notice belongs to the previous attempt; clearing it here means a
+    // player never reads last attempt's outcome as this one's.
+    setChatNotice(null);
+
+    try {
+      const outcome = await chatSender.send(draft);
+      if (!mounted.current) return;
+
+      setChatNotice(outcome.notice);
+
+      if (outcome.ok) {
+        // Cleared ONLY on a confirmed send, so a refusal never makes the player's
+        // text disappear as though it had been delivered.
+        setChatDraft('');
+        // Re-read from the server rather than appending the response locally: what
+        // the room shows is what the server stored, and the read also picks up
+        // anything other players posted meanwhile. Serialised by the refresher.
+        await refreshShared('after-send');
+      }
+      // On every failure the draft stays exactly as typed.
+    } finally {
+      if (mounted.current) setChatSending(false);
+    }
+  }, [chatDraft, chatSending, chatSender, refreshShared]);
 
   // --- social sharing -------------------------------------------------------
   //
@@ -572,7 +742,7 @@ export default function App() {
         ) : null}
 
         {/* Shared state, read from the server. */}
-        <View style={styles.card}>
+        <View style={styles.card} testID="leaderboard-card">
           <Text style={styles.cardLabel}>Global leaderboard</Text>
           {leaderboard.length === 0 ? (
             <Text style={styles.cardBody}>
@@ -587,18 +757,102 @@ export default function App() {
           )}
         </View>
 
-        <View style={styles.card}>
+        {/* Global chat: read AND write.
+            Before this change the card was read-only, so a phone player could
+            watch the room but never take part in it while the README told them
+            the app had "same chat". The composer posts through
+            POST /api/chat/send with a body of exactly { message }; the server
+            derives the handle and the score, so nothing the client could send
+            could impersonate another player or inflate a score (ISSUE-4). */}
+        <View style={styles.card} testID="chat-card">
           <Text style={styles.cardLabel}>Global chat</Text>
+
           {chat.length === 0 ? (
-            <Text style={styles.cardBody}>No messages yet.</Text>
+            <Text style={styles.cardBody} testID="chat-empty">
+              No messages yet.
+            </Text>
           ) : (
-            chat.map((entry, index) => (
-              <Text key={`${index}-${entry.username}`} style={styles.row}>
-                {entry.username}: {entry.message}
-              </Text>
-            ))
+            <View testID="chat-list">
+              {chat.map((entry, index) => (
+                // Rendered as a <Text> child, never as markup: a message
+                // containing `<img onerror=...>` stays inert characters.
+                <Text key={`${index}-${entry.username}`} style={styles.row} testID="chat-line">
+                  {composeChatLine(entry)}
+                </Text>
+              ))}
+            </View>
           )}
+
+          {/* What the player is typing. Kept on every failure; cleared only when
+              the server confirms it stored this exact text. */}
+          <TextInput
+            value={chatDraft}
+            onChangeText={setChatDraft}
+            placeholder="Write to the global room"
+            placeholderTextColor="#64748b"
+            editable={!chatSending}
+            multiline
+            testID="chat-input"
+            style={styles.input}
+          />
+
+          {/* The server's own bound, stated before the player hits it, so an
+              over-long message is not a surprise refusal. */}
+          <Text style={styles.shareCapability} testID="chat-length">
+            {`${chatDraft.trim().length} / ${CHAT_MAX_MESSAGE_LENGTH} characters. Messages longer than that are refused, not shortened.`}
+          </Text>
+
+          <TouchableOpacity
+            accessibilityRole="button"
+            testID="chat-send"
+            style={[styles.buttonChat, chatSending && styles.buttonDisabled]}
+            onPress={handleSendChat}
+            disabled={chatSending}
+          >
+            <Text style={styles.buttonText}>{chatSending ? 'Sending...' : 'Send to chat'}</Text>
+          </TouchableOpacity>
+
+          {chatNotice ? (
+            <Text
+              style={[
+                styles.shareNotice,
+                { color: chatNotice.tone === TONES.WIN ? '#22c55e' : '#f87171' },
+              ]}
+              testID="chat-notice"
+            >
+              {chatNotice.headline}
+              {chatNotice.detail ? ` ${chatNotice.detail}` : ''}
+            </Text>
+          ) : null}
+
+          {/* Whether this player can write at all, said plainly and before they
+              try. A guest can read the room but needs an identity to post one. */}
+          <Text style={styles.shareCapability} testID="chat-identity">
+            {isGuest
+              ? 'Guest - you can read the room. Sign in to join the global chat.'
+              : 'Signed in - your messages appear under the handle the server derives, never your email.'}
+          </Text>
         </View>
+
+        {/* How current the two shared cards are, and why not, if not. Stated in
+            seconds rather than described as realtime, because this client has no
+            socket and re-reads on an interval. `Date.now()` is read here, at
+            render, because a render only happens when a read lands (refreshTick)
+            or the player acts - so the age never claims to be fresher than the
+            last render actually saw. */}
+        <Text style={styles.freshness} testID="freshness">
+          {formatFreshness({
+            lastSuccessAt: lastSharedAt,
+            now: Date.now(),
+            intervalMs: REFRESH_INTERVAL_MS,
+          })}
+        </Text>
+
+        {refreshNote ? (
+          <Text style={[styles.shareNotice, { color: '#f87171' }]} testID="refresh-notice">
+            {refreshNote.message}
+          </Text>
+        ) : null}
 
         <Text style={styles.footer}>
           API: {config.apiBase || 'same origin'}
@@ -648,6 +902,10 @@ const styles = StyleSheet.create({
   // Sharing: purple to match the web app's share affordance, so the same action
   // looks like the same action on both platforms.
   buttonShare: { backgroundColor: '#a855f7', paddingVertical: 14, borderRadius: 10 },
+  // Chat: violet like the web app's chat button, so the same action looks like the
+  // same action on both platforms.
+  buttonChat: { backgroundColor: '#8b5cf6', paddingVertical: 14, borderRadius: 10 },
+  freshness: { color: '#64748b', fontSize: 11, textAlign: 'center' },
   shareText: {
     color: '#e2e8f0',
     fontSize: 14,
